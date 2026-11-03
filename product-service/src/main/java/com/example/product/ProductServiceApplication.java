@@ -1,0 +1,16 @@
+package com.example.product;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+/**
+ * Entry point of the Product Service.
+ * The Eureka client starter registers this app with Eureka automatically.
+ */
+@SpringBootApplication
+public class ProductServiceApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(ProductServiceApplication.class, args);
+    }
+}

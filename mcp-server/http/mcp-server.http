@@ -1,0 +1,273 @@
+### MCP Server - example requests (IntelliJ HTTP Client)
+### Start order: Docker infrastructure -> eureka-server -> product-service -> api-gateway -> mcp-server
+###
+### MCP uses JSON-RPC 2.0 messages sent with POST to ONE endpoint: /mcp
+### Run requests 2 and 3 first: they open an MCP session (like a login handshake).
+### Request 2 stores the session id; every later request sends it back.
+### Responses may arrive as a Server-Sent Events stream ("event: message / data: {...}")
+### - that is normal for the Streamable HTTP transport; the JSON is in the "data:" line.
+
+@mcp = http://localhost:8090/mcp
+@protocolVersion = 2025-06-18
+
+### 1. Health (normal Spring Boot endpoint, not MCP)
+GET http://localhost:8090/actuator/health
+
+### 2. initialize - the handshake. Expect serverInfo.name = "product-mcp-server",
+#    capabilities.tools, and a response header Mcp-Session-Id.
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "{{protocolVersion}}",
+    "capabilities": {},
+    "clientInfo": { "name": "intellij-http-client", "version": "1.0.0" }
+  }
+}
+
+> {%
+    client.global.set("mcpSessionId", response.headers.valueOf("Mcp-Session-Id"));
+%}
+
+### 3. notifications/initialized - completes the handshake. Expect 202 Accepted, empty body.
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/initialized"
+}
+
+### 4. tools/list - expect 3 tools: searchProducts, getProductById, getSearchFacets,
+#    each with its description and an inputSchema (JSON Schema of the parameters).
+#    This is exactly what the LLM will see in Phase 5.
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/list"
+}
+
+### ===================== tools/call - the chatbot questions =====================
+
+### 5. "Find laptops under $1,000."
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "searchProducts",
+    "arguments": { "category": "laptop", "maxPrice": 1000, "sortBy": "price" }
+  }
+}
+
+### 6. "Show me products from Apple."
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "tools/call",
+  "params": {
+    "name": "searchProducts",
+    "arguments": { "brand": "Apple" }
+  }
+}
+
+### 7. "Find products with 16 GB RAM."
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "searchProducts",
+    "arguments": { "minRamGb": 16, "maxRamGb": 16 }
+  }
+}
+
+### 8. "Show the cheapest products in the laptop category."
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "tools/call",
+  "params": {
+    "name": "searchProducts",
+    "arguments": { "category": "laptop", "sortBy": "price", "sortDirection": "asc", "size": 5 }
+  }
+}
+
+### 9. "Find products containing the word 'gaming'." (page 0, 3 per page)
+#    Expect "nextPage": 1 in the result.
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "tools/call",
+  "params": {
+    "name": "searchProducts",
+    "arguments": { "query": "gaming", "size": 3 }
+  }
+}
+
+### 10. "Show the next page of products." - same arguments, page = 1
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "tools/call",
+  "params": {
+    "name": "searchProducts",
+    "arguments": { "query": "gaming", "size": 3, "page": 1 }
+  }
+}
+
+### 11. Messy LLM-style arguments - "" and "null" are ignored, size 500 is capped to 20,
+#    "PRICE" is accepted. Expect a normal result, not an error.
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "tools/call",
+  "params": {
+    "name": "searchProducts",
+    "arguments": { "query": "", "brand": "null", "category": "LAPTOP", "sortBy": "PRICE", "size": 500 }
+  }
+}
+
+### 12. getSearchFacets - categories and brands with counts
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "tools/call",
+  "params": {
+    "name": "getSearchFacets",
+    "arguments": {}
+  }
+}
+
+### 13. getProductById - replace the id with one from request 5's result
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "tools/call",
+  "params": {
+    "name": "getProductById",
+    "arguments": { "productId": "PASTE-AN-ID-HERE" }
+  }
+}
+
+### ===================== tool errors (returned to the LLM, not crashes) =====================
+
+### 14. Unknown product id - expect "isError": true and the text
+#    "No product exists with id 'does-not-exist'. Use searchProducts to find valid product ids."
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 12,
+  "method": "tools/call",
+  "params": {
+    "name": "getProductById",
+    "arguments": { "productId": "does-not-exist" }
+  }
+}
+
+### 15. Invalid price range - expect "isError": true with a hint on how to fix the call
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "tools/call",
+  "params": {
+    "name": "searchProducts",
+    "arguments": { "minPrice": 2000, "maxPrice": 500 }
+  }
+}
+
+### 16. Invalid sort field - expect "isError": true listing the allowed values
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{
+  "jsonrpc": "2.0",
+  "id": 14,
+  "method": "tools/call",
+  "params": {
+    "name": "searchProducts",
+    "arguments": { "sortBy": "popularity" }
+  }
+}

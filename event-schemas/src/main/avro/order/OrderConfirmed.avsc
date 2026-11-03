@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "OrderConfirmed",
+  "namespace": "com.example.events.order",
+  "doc": "Owner: order-service. Topic: order.events.v1, key = orderId. All saga steps succeeded; the order is final. stock-service turns the reservation into a real stock deduction.",
+  "fields": [
+    { "name": "eventId", "type": "string" },
+    { "name": "occurredAt", "type": { "type": "long", "logicalType": "timestamp-millis" } },
+    { "name": "correlationId", "type": ["null", "string"], "default": null },
+    { "name": "orderId", "type": "string" },
+    { "name": "customerId", "type": "string" }
+  ]
+}

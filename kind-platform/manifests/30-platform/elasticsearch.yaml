@@ -1,0 +1,100 @@
+# =============================================================================
+# Elasticsearch 9.2 - the product SEARCH index (read model of product-service).
+# Same settings as compose: single node, security off (local only), 1 GB heap.
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/component: search
+    app.kubernetes.io/part-of: product-platform
+spec:
+  selector:
+    app.kubernetes.io/name: elasticsearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: elasticsearch
+    app.kubernetes.io/component: search
+    app.kubernetes.io/part-of: product-platform
+spec:
+  serviceName: elasticsearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: elasticsearch
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: elasticsearch
+        app.kubernetes.io/component: search
+        app.kubernetes.io/part-of: product-platform
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 1000                       # Elasticsearch runs as uid/gid 1000
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:9.2.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9200
+          env:
+            - name: node.name
+              value: "es01"
+            - name: cluster.name
+              value: "product-cluster"
+            # single-node: no cluster forming, and the production bootstrap checks are skipped
+            - name: discovery.type
+              value: "single-node"
+            - name: xpack.security.enabled
+              value: "false"
+            - name: xpack.security.http.ssl.enabled
+              value: "false"
+            - name: xpack.security.transport.ssl.enabled
+              value: "false"
+            - name: xpack.ml.enabled
+              value: "false"
+            - name: action.destructive_requires_name
+              value: "true"
+            - name: ES_JAVA_OPTS
+              value: "-Xms1g -Xmx1g"
+          resources:
+            requests: { cpu: 250m, memory: 1536Mi }
+            limits: { memory: 2Gi }         # heap 1 GiB + off-heap memory
+          startupProbe:
+            httpGet: { path: "/_cluster/health?local=true", port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: "/_cluster/health?local=true", port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi

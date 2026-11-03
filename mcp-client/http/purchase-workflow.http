@@ -1,0 +1,77 @@
+### Chatbot purchase workflow - enquiry vs. purchase intent (IntelliJ HTTP Client)
+### Through the gateway. Run IN ORDER: one conversation.
+### Watch the mcp-client log: "purchaseIntent=false/true" for every message,
+### and the mcp-server log for which tools were called.
+
+@chat = http://localhost:8080/api/v1/chat
+@orders = http://localhost:8080/api/v1/orders
+@demoUserId = 7c9e6679-7425-40de-944b-e07fc1f90ae7
+
+### 1. Browse - purchaseIntent=false. Expect a product list. NO order.
+POST {{chat}}
+Content-Type: application/json
+
+{ "message": "What laptops do you have under $1,000?" }
+
+> {% client.global.set("conversationId", response.body.conversationId); %}
+
+### 2. Enquiry - purchaseIntent=false. Expect stock info (checkProductStock). NO order.
+#     The bot may ask "Would you like to buy it?"
+POST {{chat}}
+Content-Type: application/json
+
+{ "conversationId": "{{conversationId}}", "message": "Is the MacBook Air 13 available?" }
+
+### 3. A question about buying is still an enquiry - purchaseIntent=false. NO order.
+POST {{chat}}
+Content-Type: application/json
+
+{ "conversationId": "{{conversationId}}", "message": "Can I buy two of them?" }
+
+### 4. Check: still no new order for the demo customer (compare with request 7)
+GET {{orders}}?userId={{demoUserId}}&size=3
+
+### 5. Explicit purchase - purchaseIntent=true.
+#     Expect: purchaseProduct called ONCE -> "Order <id> is confirmed ... total $1,099.00"
+POST {{chat}}
+Content-Type: application/json
+
+{ "conversationId": "{{conversationId}}", "message": "Yes, I want to buy the MacBook Air 13." }
+
+### 6. Out-of-stock purchase - purchaseIntent=true, but NOT_PURCHASED.
+#     Expect: "No order was placed ... out of stock" (MacBook Pro 14 has 0 units in the sample data)
+POST {{chat}}
+Content-Type: application/json
+
+{ "conversationId": "{{conversationId}}", "message": "I want to purchase the MacBook Pro 14." }
+
+### 7. Order status - purchaseIntent=false (listMyOrders / getOrderDetails)
+POST {{chat}}
+Content-Type: application/json
+
+{ "conversationId": "{{conversationId}}", "message": "Show my orders." }
+
+### 8. Exactly ONE new CONFIRMED order (from request 5) for the demo customer
+GET {{orders}}?userId={{demoUserId}}&size=3
+
+### 9b. THE REPORTED BUG - purchase in a LATER turn, product only named earlier.
+#      New conversation: enquiry first, then just "purchase".
+#      Expect: ORDER_CONFIRMED (before the fix: "issue with the product ID")
+POST {{chat}}
+Content-Type: application/json
+
+{ "message": "Is the Apple AirPods Pro 2 available?" }
+
+> {% client.global.set("conversation2", response.body.conversationId); %}
+
+### 9c. Follow-up with a single word
+POST {{chat}}
+Content-Type: application/json
+
+{ "conversationId": "{{conversation2}}", "message": "purchase" }
+
+### 9. Product that doesn't exist - purchaseIntent=true, expect "no such product", NO order
+POST {{chat}}
+Content-Type: application/json
+
+{ "message": "I want to buy the Nokia 3310 Ultra." }

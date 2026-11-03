@@ -1,0 +1,171 @@
+spring:
+  application:
+    name: rag-service
+
+  # ---------------- PostgreSQL + pgvector (container postgres-rag) ----------------
+  datasource:
+    url: ${RAG_DB_URL:jdbc:postgresql://localhost:5433/rag_db}
+    username: ${RAG_DB_USERNAME:rag_user}
+    password: ${RAG_DB_PASSWORD:rag_dev_password}
+    hikari:
+      pool-name: rag-db-pool
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 5000
+      leak-detection-threshold: 60000
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  # Flyway creates the pgvector extension, the vector table and the full-text index
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  # Uploads: keep in line with app.rag.ingestion.max-file-size
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 21MB
+
+  ai:
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      init:
+        pull-model-strategy: never
+      chat:
+        options:
+          model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}
+          temperature: 0.1
+          num-ctx: 8192
+      embedding:
+        options:
+          # 768-dimensional embeddings - MUST match vector(768) in V1__create_rag_schema.sql
+          model: ${OLLAMA_EMBEDDING_MODEL:nomic-embed-text}
+    vectorstore:
+      pgvector:
+        # Flyway owns the schema (it adds the full-text column that Spring AI does not know)
+        initialize-schema: false
+        table-name: vector_store
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        dimensions: 768
+        max-document-batch-size: 100
+    retry:
+      max-attempts: 2
+      backoff:
+        initial-interval: 1s
+        multiplier: 2
+        max-interval: 5s
+
+server:
+  port: 8093
+  forward-headers-strategy: framework
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8762/eureka/}
+  instance:
+    instance-id: ${spring.application.name}:${server.port}
+    hostname: localhost
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: Document knowledge base (RAG)
+
+app:
+  rag:
+    ingestion:
+      # Chunk size in tokens: small enough to be precise, big enough to carry context
+      chunk-size-tokens: 400
+      min-chunk-size-chars: 150
+      max-file-size: 20MB
+      allowed-extensions: pdf,docx,pptx,txt,md,html
+      # Parallel ingestions (embedding on CPU is slow; more threads compete with the chat model)
+      worker-threads: 2
+      queue-capacity: 50
+
+    retrieval:
+      # ---- 1. Hybrid search: candidates from each leg ----
+      vector-candidates: 20
+      keyword-candidates: 20
+      # Vector hits below this cosine similarity are ignored (0..1)
+      min-similarity: 0.30
+      # Reciprocal Rank Fusion constant (60 is the usual value from the RRF paper)
+      rrf-k: 60
+      # ---- 3. Reranking: how many fused candidates the reranker scores ----
+      rerank-candidates: 20
+      # Chunks with a lower rerank score are dropped (0..1) -> allows "not in the documents"
+      min-rerank-score: 0.10
+      # ---- 4. Top-K ----
+      default-top-k: 5
+      max-top-k: 10
+
+    reranker:
+      # cross-encoder = TEI container (recommended) | llm = Ollama chat model | none
+      type: cross-encoder
+      base-url: ${RERANKER_URL:http://localhost:8095}
+      timeout: 15s
+
+logging:
+  # ================= Centralized logging (same block in every service) =================
+  # Console: human-readable (pattern below). File: one JSON object per line (ECS format)
+  # in a folder SHARED by all services -> a log shipper (e.g. Grafana Alloy) can later send
+  # every service's logs to Grafana Loki without any code change.
+  file:
+    # product-platform/logs/<service-name>.log  (override the folder with env var LOG_DIR)
+    name: ${LOG_DIR:../logs}/${spring.application.name}.log
+  structured:
+    format:
+      # JSON for the file only. In containers, also set LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs
+      # (JSON on stdout is what container log collectors read).
+      file: ecs
+    ecs:
+      service:
+        # These four fields are added to EVERY log line: filter by service/environment in Loki
+        name: ${spring.application.name}
+        version: "0.0.1-SNAPSHOT"
+        environment: ${APP_ENVIRONMENT:local}
+        node-name: ${HOSTNAME:${COMPUTERNAME:unknown}}
+  logback:
+    rollingpolicy:
+      # New file every day or at 50 MB; old files are gzipped and deleted after 7 days.
+      # total-size-cap: the log folder of ONE service can never grow beyond 1 GB.
+      max-file-size: 50MB
+      max-history: 7
+      total-size-cap: 1GB
+  pattern:
+    level: "%5p [%X{correlationId:-}]"
+  level:
+    com.example.rag: INFO
+
+# ================= OpenAPI / Swagger =================
+# This service only GENERATES its API description at /v3/api-docs.
+# The Swagger UI for ALL services is on the gateway: http://localhost:8080/swagger-ui.html
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  # Only the business API (no /actuator, no /error)
+  paths-to-match: /api/v1/**
+  show-actuator: false
+  default-produces-media-type: application/json

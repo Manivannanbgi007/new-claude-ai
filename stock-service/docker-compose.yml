@@ -1,0 +1,160 @@
+# ---------------------------------------------------------------
+# Product Platform - local development infrastructure
+# Start:  docker compose up -d      (run inside the infrastructure folder)
+# Values like ${ELASTIC_VERSION} come from the .env file next to this one.
+# ---------------------------------------------------------------
+name: product-platform
+
+services:
+
+  # -------------------- Elasticsearch --------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    container_name: elasticsearch
+    environment:
+      - node.name=es01
+      - cluster.name=${ES_CLUSTER_NAME}
+      - discovery.type=single-node
+      # LOCAL DEV ONLY: security off so apps and Kibana connect without passwords
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+      - xpack.ml.enabled=false
+      - ES_JAVA_OPTS=-Xms${ES_HEAP} -Xmx${ES_HEAP}
+      - action.destructive_requires_name=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "127.0.0.1:${ES_PORT}:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 40s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- Kibana --------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION}
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=kibana
+      - SERVER_PUBLICBASEURL=http://localhost:${KIBANA_PORT}
+    ports:
+      - "127.0.0.1:${KIBANA_PORT}:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q '\"level\":\"available\"' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- Ollama --------------------
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION}
+    container_name: ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=30m
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH}
+    ports:
+      - "127.0.0.1:${OLLAMA_PORT}:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # One-time model download (exits with code 0 when done)
+  ollama-model-init:
+    image: ollama/ollama:${OLLAMA_VERSION}
+    container_name: ollama-model-init
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["ollama", "pull", "${OLLAMA_CHAT_MODEL}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - platform-net
+    restart: "no"
+
+  # -------------------- MySQL --------------------
+  mysql-product:
+    image: mysql:${MYSQL_VERSION}
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      # Created automatically on the FIRST start (empty data volume) only:
+      MYSQL_DATABASE: ${STOCK_DB_NAME}
+      MYSQL_USER: ${STOCK_DB_USER}
+      MYSQL_PASSWORD: ${STOCK_DB_PASSWORD}
+      TZ: UTC
+    command:
+      # Full Unicode support (emoji, all languages)
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      - "127.0.0.1:${MYSQL_PORT}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # $$ = a literal $ for docker compose; the variable is read inside the container
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  adminer-product:
+    image: adminer:4
+    container_name: licensing-adminer
+    restart: unless-stopped
+    ports:
+      - "8099:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: mysql-product
+      ADMINER_DESIGN: dracula
+    depends_on:
+      mysql-product:
+        condition: service_healthy
+    networks:
+      - platform-net
+
+volumes:
+  es-data:
+    name: product-platform-es-data
+  ollama-data:
+    name: product-platform-ollama-data
+  mysql-data:
+    name: product-platform-mysql-data
+
+networks:
+  platform-net:
+    name: product-platform-net
+    driver: bridge

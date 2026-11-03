@@ -1,0 +1,105 @@
+### API Gateway - example requests (IntelliJ HTTP Client)
+### Start order: Docker infrastructure -> eureka-server -> product-service -> api-gateway
+### Every request goes to port 8080; the gateway forwards product calls to product-service.
+
+@gateway = http://localhost:8080
+@api = {{gateway}}/api/v1/products
+
+### ===================== GATEWAY =====================
+
+### 1. Gateway health - expect "status":"UP"
+GET {{gateway}}/actuator/health
+
+### 2. Active routes - expect a route with "route_id": "product-service" and "uri": "lb://product-service"
+GET {{gateway}}/actuator/gateway/routes
+
+### 3. Path without a route - expect 404 ProblemDetail from the GATEWAY
+#    (body contains "correlationId"; product-service never sees this request)
+GET {{gateway}}/api/v1/unknown
+
+### 4. Correlation id is forwarded - expect response header X-Correlation-Id: demo-trace-12345
+#    and the same id in the product-service log line.
+GET {{api}}?size=1
+X-Correlation-Id: demo-trace-12345
+
+### 5. Invalid correlation id is replaced - expect a NEW UUID in the X-Correlation-Id response header
+GET {{api}}?size=1
+X-Correlation-Id: bad id with spaces
+
+### ===================== PRODUCTS THROUGH THE GATEWAY =====================
+
+### 6. Create - expect 201; Location header must start with http://localhost:8080 (the gateway!)
+POST {{api}}
+Content-Type: application/json
+
+{
+  "sku": "MON-BNQ-001",
+  "name": "BenQ PD2706U 27 4K Designer Monitor",
+  "description": "27-inch 4K monitor with accurate colours for designers and programmers.",
+  "brand": "BenQ",
+  "category": "monitor",
+  "price": 549.00,
+  "rating": 4.5,
+  "tags": ["4k", "usb-c", "design"]
+}
+
+> {%
+    client.global.set("gatewayProductId", response.body.id);
+    client.test("Location points to gateway", () => {
+        const location = response.headers.valueOf("Location");
+        client.assert(location && location.startsWith("http://localhost:8080"), "Location: " + location);
+    });
+%}
+
+### 7. Get by id
+GET {{api}}/{{gatewayProductId}}
+
+### 8. Update
+PUT {{api}}/{{gatewayProductId}}
+Content-Type: application/json
+
+{
+  "sku": "MON-BNQ-001",
+  "name": "BenQ PD2706U 27 4K Designer Monitor",
+  "description": "27-inch 4K monitor with accurate colours for designers and programmers.",
+  "brand": "BenQ",
+  "category": "monitor",
+  "price": 499.00,
+  "rating": 4.6,
+  "tags": ["4k", "usb-c", "design"]
+}
+
+### 9. Laptops under $1,000, cheapest first
+GET {{api}}?category=laptop&maxPrice=1000&sortBy=price
+
+### 10. Products from Apple
+GET {{api}}?brand=apple
+
+### 11. Products with 16 GB RAM
+GET {{api}}?minRamGb=16&maxRamGb=16
+
+### 12. Text search "gaming", 5 per page
+GET {{api}}?q=gaming&size=5
+
+### 13. Next page of the same search
+GET {{api}}?q=gaming&size=5&page=1
+
+### 14. Facets
+GET {{api}}/facets
+
+### 15. Backend error passes through unchanged - expect product-service's 404 ProblemDetail
+GET {{api}}/does-not-exist
+
+### 16. Backend validation error passes through - expect 400 with "errors"
+GET {{api}}?minPrice=2000&maxPrice=500
+
+### 17. Delete - expect 204
+DELETE {{api}}/{{gatewayProductId}}
+
+### ===================== FAILURE TEST (manual) =====================
+
+### 18. Stop product-service, wait ~90 seconds, then run this.
+#    Expect 503 ProblemDetail from the gateway:
+#    "detail": "The requested service is temporarily unavailable. Please try again later."
+#    Start product-service again and it works after ~30-60 seconds.
+GET {{api}}?size=1

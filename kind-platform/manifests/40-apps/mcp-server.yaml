@@ -1,0 +1,135 @@
+# =============================================================================
+# mcp-server (8090) - MCP tools for the chatbot; calls the business APIs THROUGH the api-gateway
+# Same pattern as the user-service reference: ConfigMap + Deployment + Service.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-server-config
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: mcp-server
+    app.kubernetes.io/component: ai
+    app.kubernetes.io/part-of: product-platform
+data:
+  # tools call the gateway's Kubernetes Service
+  PRODUCT_API_BASE_URL: "http://api-gateway:8080"
+  # demo customer (until security exists)
+  CHATBOT_CUSTOMER_ID: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+  # ready = started
+  MANAGEMENT_ENDPOINT_HEALTH_GROUP_READINESS_INCLUDE: "readinessState"
+  # Kubernetes Services + DNS replace Eureka
+  EUREKA_CLIENT_ENABLED: "false"
+  # /actuator/health/liveness and /readiness
+  MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+  # finish running requests before the Pod stops
+  SERVER_SHUTDOWN: "graceful"
+  SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE: "20s"
+  # JSON logs on stdout (kubectl logs, later Loki)
+  LOGGING_STRUCTURED_FORMAT_CONSOLE: "ecs"
+  # no log file in containers
+  LOGGING_FILE_NAME: ""
+  APP_ENVIRONMENT: "kind"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: mcp-server
+    app.kubernetes.io/component: ai
+    app.kubernetes.io/part-of: product-platform
+spec:
+  replicas: 1                          # laptop-friendly; scale with kubectl (GUIDE.md step 22)
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-server
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-server
+        app.kubernetes.io/component: ai
+        app.kubernetes.io/part-of: product-platform
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp-server
+      containers:
+        - name: mcp-server
+          image: mcp-server:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: mcp-server-config
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { cpu: "1", memory: 768Mi }
+          startupProbe:                      # up to 60 x 5 s = 5 min (many JVMs start at once on a laptop)
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 200Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: mcp-server
+    app.kubernetes.io/component: ai
+    app.kubernetes.io/part-of: product-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: mcp-server
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http

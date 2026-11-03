@@ -1,0 +1,149 @@
+spring:
+  application:
+    name: product-service
+
+  # ---------------- Kafka (Spring Boot auto-configuration) ----------------
+  # Every Kafka setting lives here. Change it per environment with an environment
+  # variable or a profile file (application-prod.yml) - no Java changes needed.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # Passed to consumers AND producers (Confluent settings go here)
+    properties:
+      schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:18081}
+      # Debezium's schema is generated from the MySQL table at runtime: no generated
+      # Java classes, so Avro is read as GenericRecord.
+      specific.avro.reader: false
+
+    consumer:
+      # One consumer group per service; instances share the partitions.
+      group-id: product-service
+      # A new group reads from the beginning: that is how the index is (re)built.
+      auto-offset-reset: earliest
+      # Offsets are committed by Spring only after the projector succeeded.
+      enable-auto-commit: false
+      isolation-level: read-committed
+      max-poll-records: 100
+      # Key = JSON text {"id":"..."}; value = raw bytes, decoded from Avro in the
+      # listener. Raw bytes let a failed record go to the DLT exactly as it arrived.
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+
+    # The producer is only used to publish failed records to the dead letter topic.
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+
+    listener:
+      # Commit after each record: the smallest possible redelivery after a crash.
+      ack-mode: record
+      # Listener threads. Max useful value = partition count (3).
+      concurrency: 3
+
+  elasticsearch:
+    # Elasticsearch from docker compose (Phase 0). Override with env var ELASTICSEARCH_URIS.
+    uris: ${ELASTICSEARCH_URIS:http://localhost:9200}
+    connection-timeout: 5s
+    socket-timeout: 30s
+    # Needed only when Elasticsearch security is enabled (not in local dev):
+    # username: ${ELASTICSEARCH_USERNAME}
+    # password: ${ELASTICSEARCH_PASSWORD}
+
+server:
+  port: 8081
+  # Trust X-Forwarded-* headers so generated links (Location header) point to the
+  # API Gateway instead of this service. Only safe when the service is reachable
+  # through the trusted gateway, which is the setup we are building.
+  forward-headers-strategy: framework
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8762/eureka/}
+  instance:
+    # Readable, unique id on the Eureka dashboard, e.g. product-service:8081
+    instance-id: ${spring.application.name}:${server.port}
+    # Apps run on your Windows machine, so other apps reach this one at localhost
+    hostname: localhost
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: Read side - Elasticsearch projection and search API
+
+app:
+  kafka:
+    # Retry / dead-letter behaviour of the CDC listener (used by config/KafkaConfig)
+    error-handling:
+      # Transient errors (Elasticsearch or Schema Registry down) are retried with
+      # exponential backoff: 1s, 2s, 4s ... capped at max-interval, until they succeed.
+      initial-interval: 1s
+      multiplier: 2.0
+      max-interval: 30s
+      # Permanent errors go to <topic><dlt-suffix>, e.g. cdc.product_db.product.product-service.dlt
+      dlt-suffix: .${spring.kafka.consumer.group-id}.dlt
+  cdc:
+    # Debezium topic: <topic.prefix>.<database>.<table>
+    product-topic: cdc.product_db.product
+
+logging:
+  # ================= Centralized logging (same block in every service) =================
+  # Console: human-readable (pattern below). File: one JSON object per line (ECS format)
+  # in a folder SHARED by all services -> a log shipper (e.g. Grafana Alloy) can later send
+  # every service's logs to Grafana Loki without any code change.
+  file:
+    # product-platform/logs/<service-name>.log  (override the folder with env var LOG_DIR)
+    name: ${LOG_DIR:../logs}/${spring.application.name}.log
+  structured:
+    format:
+      # JSON for the file only. In containers, also set LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs
+      # (JSON on stdout is what container log collectors read).
+      file: ecs
+    ecs:
+      service:
+        # These four fields are added to EVERY log line: filter by service/environment in Loki
+        name: ${spring.application.name}
+        version: "@project.version@"
+        environment: ${APP_ENVIRONMENT:local}
+        node-name: ${HOSTNAME:${COMPUTERNAME:unknown}}
+  logback:
+    rollingpolicy:
+      # New file every day or at 50 MB; old files are gzipped and deleted after 7 days.
+      # total-size-cap: the log folder of ONE service can never grow beyond 1 GB.
+      max-file-size: 50MB
+      max-history: 7
+      total-size-cap: 1GB
+  pattern:
+    # Adds the correlation id to every log line, e.g.  INFO [3f2a...]
+    level: "%5p [%X{correlationId:-}]"
+  level:
+    com.example.product: INFO
+    # DEBUG shows every change event (op, partition, offset):
+    com.example.product.projection: INFO
+    # Shows "partitions assigned" when the listener has joined the consumer group
+    org.springframework.kafka.listener: INFO
+
+# ================= OpenAPI / Swagger =================
+# This service only GENERATES its API description at /v3/api-docs.
+# The Swagger UI for ALL services is on the gateway: http://localhost:8080/swagger-ui.html
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  # Only the business API (no /actuator, no /error)
+  paths-to-match: /api/v1/**
+  show-actuator: false
+  default-produces-media-type: application/json

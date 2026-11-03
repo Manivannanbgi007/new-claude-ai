@@ -1,0 +1,79 @@
+spring:
+  application:
+    name: eureka-server
+
+server:
+  port: 8761
+
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    # This application IS the registry, so it must not register with itself
+    # or try to download the registry from another Eureka server.
+    register-with-eureka: false
+    fetch-registry: false
+    service-url:
+      defaultZone: http://${eureka.instance.hostname}:${server.port}/eureka/
+  server:
+    # LOCAL DEV ONLY: remove stopped services from the dashboard quickly.
+    # In production keep self-preservation enabled (the default: true).
+    enable-self-preservation: false
+    # How often (ms) Eureka removes instances that stopped sending heartbeats
+    eviction-interval-timer-in-ms: 10000
+    # Single server: don't wait at startup for peers to sync (default 5 min)
+    wait-time-in-ms-when-sync-empty: 0
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Expose only what is needed; never expose all endpoints by default
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      # Show the "info.*" properties below at /actuator/info
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: Service registry for the product platform
+
+logging:
+  # ================= Centralized logging (same block in every service) =================
+  # Console: human-readable (pattern below). File: one JSON object per line (ECS format)
+  # in a folder SHARED by all services -> a log shipper (e.g. Grafana Alloy) can later send
+  # every service's logs to Grafana Loki without any code change.
+  file:
+    # product-platform/logs/<service-name>.log  (override the folder with env var LOG_DIR)
+    name: ${LOG_DIR:../logs}/${spring.application.name}.log
+  structured:
+    format:
+      # JSON for the file only. In containers, also set LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs
+      # (JSON on stdout is what container log collectors read).
+      file: ecs
+    ecs:
+      service:
+        # These four fields are added to EVERY log line: filter by service/environment in Loki
+        name: ${spring.application.name}
+        version: "@project.version@"
+        environment: ${APP_ENVIRONMENT:local}
+        node-name: ${HOSTNAME:${COMPUTERNAME:unknown}}
+  logback:
+    rollingpolicy:
+      # New file every day or at 50 MB; old files are gzipped and deleted after 7 days.
+      # total-size-cap: the log folder of ONE service can never grow beyond 1 GB.
+      max-file-size: 50MB
+      max-history: 7
+      total-size-cap: 1GB
+  pattern:
+    # Console: level + correlation id of the request/event (empty when there is none)
+    level: "%5p [%X{correlationId:-}]"
+  level:
+    # Eureka is chatty at INFO; WARN keeps the console readable
+    com.netflix.eureka: WARN
+    com.netflix.discovery: WARN

@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# ONE Dockerfile for ALL Spring Boot services of the platform.
+#
+# Why not one Dockerfile per service folder (like the eureka-server reference)?
+# order-, stock-, product- and product-write-service compile against the event-schemas
+# LIBRARY, which only exists in your local ~/.m2. A Docker build can't see that folder,
+# so this build compiles event-schemas FIRST, then the service.
+# The build context is therefore the product-platform folder (all projects).
+#
+# Build (from the product-platform folder):
+#   docker build -f kind-platform/docker/Dockerfile.service --build-arg SERVICE=order-service -t order-service:1.0.0 .
+# Same runtime stage as the eureka-server reference; only HEALTHCHECK is left out,
+# because in Kubernetes the probes in the Deployment do that job.
+# =============================================================================
+
+# ---------- Stage 1: build ----------
+FROM maven:3.9-eclipse-temurin-21 AS build
+# The folder name of the service to build, e.g. order-service
+ARG SERVICE
+WORKDIR /build
+
+# 1. event-schemas -> installed into the (cached) local Maven repository
+COPY event-schemas/pom.xml event-schemas/pom.xml
+COPY event-schemas/src event-schemas/src
+RUN --mount=type=cache,target=/root/.m2 \
+    mvn -B -q -f event-schemas/pom.xml install -DskipTests
+
+# 2. the service itself (finds event-schemas:1.0.0 in the same cached repository)
+COPY ${SERVICE}/pom.xml ${SERVICE}/pom.xml
+COPY ${SERVICE}/src ${SERVICE}/src
+RUN --mount=type=cache,target=/root/.m2 \
+    mvn -B -q -f ${SERVICE}/pom.xml package -DskipTests
+
+# 3. split the JAR into layers (dependencies change rarely, your code often)
+RUN cp ${SERVICE}/target/*.jar app.jar \
+    && java -Djarmode=tools -jar app.jar extract --layers --destination extracted
+
+# ---------- Stage 2: runtime ----------
+FROM eclipse-temurin:21-jre-alpine
+ARG PORT=8080
+
+RUN addgroup -S -g 1001 spring \
+    && adduser -S -u 1001 -G spring spring
+
+WORKDIR /app
+
+COPY --from=build /build/extracted/dependencies/ ./
+COPY --from=build /build/extracted/spring-boot-loader/ ./
+COPY --from=build /build/extracted/snapshot-dependencies/ ./
+COPY --from=build /build/extracted/application/ ./
+
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
+
+USER 1001:1001
+EXPOSE ${PORT}
+
+ENTRYPOINT ["java", "-jar", "app.jar"]

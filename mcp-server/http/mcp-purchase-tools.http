@@ -1,0 +1,180 @@
+### MCP Server - stock, order and purchase tools (IntelliJ HTTP Client)
+### Needs: gateway, product-service, stock-service, order-service running.
+### Run 1 and 2 first (MCP handshake), then any request below.
+
+@mcp = http://localhost:8090/mcp
+@protocolVersion = 2025-06-18
+
+### 1. initialize
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{
+  "jsonrpc": "2.0", "id": 1, "method": "initialize",
+  "params": { "protocolVersion": "{{protocolVersion}}", "capabilities": {},
+              "clientInfo": { "name": "intellij-http-client", "version": "1.0.0" } }
+}
+
+> {% client.global.set("mcpSessionId", response.headers.valueOf("Mcp-Session-Id")); %}
+
+### 2. notifications/initialized - expect 202
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "method": "notifications/initialized" }
+
+### 3. tools/list - expect 7 tools: searchProducts, getProductById, getSearchFacets,
+#     checkProductStock, getOrderDetails, listMyOrders, purchaseProduct
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }
+
+### 4. searchProducts - results now include "sku" next to "id". Copy the MacBook Air "id" for request 8.
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+  "params": { "name": "searchProducts", "arguments": { "query": "macbook air" } } }
+
+### ===================== STOCK (read-only) =====================
+
+### 5. In stock - expect "canBeOrdered": true
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+  "params": { "name": "checkProductStock", "arguments": { "sku": "LAP-APL-001", "quantity": 1 } } }
+
+### 6. Out of stock - expect "status": "OUT_OF_STOCK", "canBeOrdered": false
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+  "params": { "name": "checkProductStock", "arguments": { "sku": "LAP-APL-002" } } }
+
+### 7. Unknown SKU - expect "status": "NOT_STOCKED"
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+  "params": { "name": "checkProductStock", "arguments": { "sku": "NOPE-000" } } }
+
+### ===================== PURCHASE WORKFLOW =====================
+
+### 8. Buy 1 MacBook Air BY NAME (no id needed - the tool identifies the product).
+#     Expect "outcome": "ORDER_CONFIRMED" with an order id (Identify -> Get Product -> Check Stock -> Create Order).
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+  "params": { "name": "purchaseProduct", "arguments": { "productName": "MacBook Air 13", "quantity": 1 } } }
+
+### 9. Same call again within the same minute - expect the SAME order id (idempotency key: no second order)
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+  "params": { "name": "purchaseProduct", "arguments": { "productName": "MacBook Air 13", "quantity": 1 } } }
+
+### 10. The bug from the chat: a SKU passed as productId + a product name.
+#      Before the fix: PRODUCT_NOT_FOUND. Now: the SKU is ignored and the product is found by name -> ORDER_CONFIRMED
+#      (the same order as request 8 if run within the same minute: idempotency).
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+  "params": { "name": "purchaseProduct", "arguments": { "productName": "Apple MacBook Air 13 M3", "productId": "LAP-APL-001" } } }
+
+### 10b. Product that does not exist - expect "NOT_PURCHASED", "reason": "PRODUCT_NOT_FOUND"
+#       (fuzzy search finds "Bose ... Ultra ...", but it is NOT accepted as a match)
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 91, "method": "tools/call",
+  "params": { "name": "purchaseProduct", "arguments": { "productName": "Nokia 3310 Ultra" } } }
+
+### 10c. Ambiguous name - expect "NOT_PURCHASED", "reason": "AMBIGUOUS_PRODUCT",
+#       "candidates": ["Apple iPhone 16", "Apple iPhone 16 Pro Max"]
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 92, "method": "tools/call",
+  "params": { "name": "purchaseProduct", "arguments": { "productName": "iPhone 16" } } }
+
+### 11. Out-of-stock product by name.
+#      Expect "NOT_PURCHASED", "reason": "INSUFFICIENT_STOCK" - and NO new order in listMyOrders.
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+  "params": { "name": "purchaseProduct", "arguments": { "productName": "MacBook Pro 14" } } }
+
+### 12. Too many units - expect isError true: "quantity must be between 1 and 10."
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+  "params": { "name": "purchaseProduct", "arguments": { "productName": "MacBook Air 13", "quantity": 50 } } }
+
+### ===================== ORDERS (read-only) =====================
+
+### 13. My orders - expect the order from request 8 (demo customer)
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+  "params": { "name": "listMyOrders", "arguments": {} } }
+
+### 14. Order details - paste the orderId from request 8
+POST {{mcp}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Mcp-Session-Id: {{mcpSessionId}}
+MCP-Protocol-Version: {{protocolVersion}}
+
+{ "jsonrpc": "2.0", "id": 13, "method": "tools/call",
+  "params": { "name": "getOrderDetails", "arguments": { "orderId": "PASTE-ORDER-ID" } } }

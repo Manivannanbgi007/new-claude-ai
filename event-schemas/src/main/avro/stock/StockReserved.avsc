@@ -1,0 +1,26 @@
+{
+  "type": "record",
+  "name": "StockReserved",
+  "namespace": "com.example.events.stock",
+  "doc": "Owner: stock-service. Topic: stock.events.v1, key = orderId. Every line of the order is reserved.",
+  "fields": [
+    { "name": "eventId", "type": "string" },
+    { "name": "occurredAt", "type": { "type": "long", "logicalType": "timestamp-millis" } },
+    { "name": "correlationId", "type": ["null", "string"], "default": null },
+    { "name": "orderId", "type": "string" },
+    {
+      "name": "items",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "ReservedLine",
+          "fields": [
+            { "name": "sku", "type": "string" },
+            { "name": "quantity", "type": "int" }
+          ]
+        }
+      }
+    }
+  ]
+}

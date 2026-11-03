@@ -1,0 +1,113 @@
+### API Gateway - route verification (IntelliJ HTTP Client)
+### EVERY request goes to port 8080. Start all services first (see docs/api-gateway-and-mcp-integration.md).
+### Each request names the service that should answer it.
+
+@gw = http://localhost:8080
+@demoUserId = 7c9e6679-7425-40de-944b-e07fc1f90ae7
+
+### 1. Gateway health
+GET {{gw}}/actuator/health
+
+### 2. All active routes - expect 10 routes (product-write-service, product-service,
+#     stock-reservations-blocked, stock-service, order-service, user-service, rag-service,
+#     mcp-client-api, mcp-client-ui, root-redirect)
+GET {{gw}}/actuator/gateway/routes
+
+### ===================== PRODUCTS =====================
+
+### 3. GET -> product-service (Elasticsearch read side) - expect a page of products
+GET {{gw}}/api/v1/products?q=gaming&size=3
+
+> {% client.global.set("productId", response.body.content[0].id); %}
+
+### 4. GET by id -> product-service - expect a product with "version"
+GET {{gw}}/api/v1/products/{{productId}}
+
+### 5. GET facets -> product-service
+GET {{gw}}/api/v1/products/facets
+
+### 6. POST -> product-write-service (MySQL write side) - expect 201
+POST {{gw}}/api/v1/products
+Content-Type: application/json
+X-User-Id: {{demoUserId}}
+
+{
+  "sku": "GW-TEST-001",
+  "name": "Gateway Routing Test Keyboard",
+  "description": "Mechanical keyboard used to verify gateway routing.",
+  "brand": "TestBrand",
+  "category": "accessories",
+  "price": 79.00,
+  "rating": 4.1,
+  "tags": ["test", "keyboard"]
+}
+
+> {% client.global.set("writeProductId", response.body.id); %}
+
+### 7. DELETE -> product-write-service - expect 204
+DELETE {{gw}}/api/v1/products/{{writeProductId}}
+
+### ===================== STOCK =====================
+
+### 8. Availability -> stock-service - expect "available": true
+GET {{gw}}/api/v1/stock/LAP-APL-001/availability?quantity=1
+
+### 9. Low-stock report -> stock-service
+GET {{gw}}/api/v1/stock?lowStockOnly=true
+
+### 10. Reservations are INTERNAL - expect 403 from the gateway (never reaches stock-service)
+POST {{gw}}/api/v1/stock/reservations
+Content-Type: application/json
+
+{ "orderId": "HACK-1", "items": [ { "sku": "LAP-APL-001", "quantity": 999 } ] }
+
+### ===================== ORDERS =====================
+
+### 11. Order-service catalogue copy -> order-service - expect "totalElements" >= 30
+GET {{gw}}/api/v1/orders/catalog?size=3
+
+### 12. Create an order -> order-service - expect 202 PENDING (watch the gateway log: user=...)
+POST {{gw}}/api/v1/orders
+Content-Type: application/json
+X-User-Id: {{demoUserId}}
+
+{
+  "userId": "{{demoUserId}}",
+  "items": [ { "sku": "AUD-APL-001", "quantity": 1 } ]
+}
+
+> {% client.global.set("gwOrderId", response.body.id); %}
+
+### 13. Get it -> order-service - expect CONFIRMED after about a second
+GET {{gw}}/api/v1/orders/{{gwOrderId}}
+
+### 14. Orders of the user -> order-service
+GET {{gw}}/api/v1/orders?userId={{demoUserId}}
+X-User-Id: {{demoUserId}}
+
+### ===================== USERS =====================
+
+### 15. List users -> user-service
+GET {{gw}}/api/v1/users?size=3
+
+### ===================== RAG =====================
+
+### 15b. Knowledge-base documents -> rag-service
+GET {{gw}}/api/v1/rag/documents
+
+### 15c. Retrieval -> rag-service
+POST {{gw}}/api/v1/rag/search
+Content-Type: application/json
+
+{ "query": "return policy for opened headphones", "topK": 3 }
+
+### ===================== CHAT =====================
+
+### 16. Chat UI -> mcp-client - expect HTML
+GET {{gw}}/chat/
+
+### 17. Root -> 302 redirect to /chat/
+GET {{gw}}/
+
+### 18. Unknown path - expect 404 ProblemDetail FROM THE GATEWAY ("No API exists at this path.")
+GET {{gw}}/api/v1/unknown

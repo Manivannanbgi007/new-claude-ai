@@ -1,0 +1,38 @@
+{
+  "type": "record",
+  "name": "StockReservationFailed",
+  "namespace": "com.example.events.stock",
+  "doc": "Owner: stock-service. Topic: stock.events.v1, key = orderId. The order could not be reserved; NOTHING was reserved (all-or-nothing).",
+  "fields": [
+    { "name": "eventId", "type": "string" },
+    { "name": "occurredAt", "type": { "type": "long", "logicalType": "timestamp-millis" } },
+    { "name": "correlationId", "type": ["null", "string"], "default": null },
+    { "name": "orderId", "type": "string" },
+    {
+      "name": "reason",
+      "type": {
+        "type": "enum",
+        "name": "StockFailureReason",
+        "symbols": ["UNKNOWN", "INSUFFICIENT_STOCK", "UNKNOWN_SKU"],
+        "default": "UNKNOWN"
+      },
+      "default": "UNKNOWN"
+    },
+    {
+      "name": "shortages",
+      "default": [],
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "StockShortageLine",
+          "fields": [
+            { "name": "sku", "type": "string" },
+            { "name": "requestedQuantity", "type": "int" },
+            { "name": "availableQuantity", "type": "int" }
+          ]
+        }
+      }
+    }
+  ]
+}

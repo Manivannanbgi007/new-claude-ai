@@ -1,0 +1,551 @@
+# ---------------------------------------------------------------
+# Product Platform - local development infrastructure
+# Start:  docker compose up -d      (run inside the infrastructure folder)
+# Values like ${ELASTIC_VERSION} come from the .env file next to this one.
+# ---------------------------------------------------------------
+name: product-platform
+
+services:
+
+  # -------------------- Elasticsearch --------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    container_name: elasticsearch
+    environment:
+      - node.name=es01
+      - cluster.name=${ES_CLUSTER_NAME}
+      - discovery.type=single-node
+      # LOCAL DEV ONLY: security off so apps and Kibana connect without passwords
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+      - xpack.ml.enabled=false
+      - ES_JAVA_OPTS=-Xms${ES_HEAP} -Xmx${ES_HEAP}
+      - action.destructive_requires_name=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "127.0.0.1:${ES_PORT}:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 40s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- Kibana --------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION}
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=kibana
+      - SERVER_PUBLICBASEURL=http://localhost:${KIBANA_PORT}
+    ports:
+      - "127.0.0.1:${KIBANA_PORT}:5601"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:5601/api/status | grep -q '\"level\":\"available\"' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- Ollama --------------------
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION}
+    container_name: ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=30m
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH}
+    ports:
+      - "127.0.0.1:${OLLAMA_PORT}:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # One-time model download (exits with code 0 when done)
+  ollama-model-init:
+    image: ollama/ollama:${OLLAMA_VERSION}
+    container_name: ollama-model-init
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    # Pulls the chat model AND the embedding model (RAG). Already downloaded = a few seconds.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - ollama pull ${OLLAMA_CHAT_MODEL} && ollama pull ${OLLAMA_EMBEDDING_MODEL}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - platform-net
+    restart: "no"
+
+  # -------------------- MySQL --------------------
+  mysql:
+    image: mysql:${MYSQL_VERSION}
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      # Created automatically on the FIRST start (empty data volume) only:
+      MYSQL_DATABASE: ${STOCK_DB_NAME}
+      MYSQL_USER: ${STOCK_DB_USER}
+      MYSQL_PASSWORD: ${STOCK_DB_PASSWORD}
+      TZ: UTC
+    command:
+      # Full Unicode support (emoji, all languages)
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      - "127.0.0.1:${MYSQL_PORT}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # Extra init scripts for the shared MySQL - run on an EMPTY volume only
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # $$ = a literal $ for docker compose; the variable is read inside the container
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- MySQL for the product module (source of truth + CDC) --------------------
+  mysql-product:
+    image: mysql:${MYSQL_VERSION}
+    container_name: mysql-product
+    environment:
+      MYSQL_ROOT_PASSWORD: ${PRODUCT_MYSQL_ROOT_PASSWORD}
+      # Created automatically on the FIRST start (empty volume):
+      MYSQL_DATABASE: ${PRODUCT_DB_NAME}
+      MYSQL_USER: ${PRODUCT_DB_USER}
+      MYSQL_PASSWORD: ${PRODUCT_DB_PASSWORD}
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # Settings Debezium needs. They are MySQL 8.4 defaults; written here explicitly
+      # so nobody switches them off by accident.
+      - --log-bin=mysql-bin               # binary log ON (Debezium reads it)
+      - --binlog-row-image=FULL           # full before/after row in every change
+      - --binlog-expire-logs-seconds=604800   # keep binlog 7 days (Debezium can be down that long)
+      - --server-id=2                     # unique id in the replication topology
+    ports:
+      - "127.0.0.1:${PRODUCT_MYSQL_PORT}:3306"
+    volumes:
+      - mysql-product-data:/var/lib/mysql
+      # Creates the read-only Debezium user - runs on an EMPTY volume only
+      - ./mysql-product/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- MySQL for user-service (database per service) --------------------
+  mysql-user:
+    image: mysql:${MYSQL_VERSION}
+    container_name: mysql-user
+    environment:
+      MYSQL_ROOT_PASSWORD: ${USER_MYSQL_ROOT_PASSWORD}
+      # Created automatically on the FIRST start (empty volume) - no manual SQL needed:
+      MYSQL_DATABASE: ${USER_DB_NAME}
+      MYSQL_USER: ${USER_DB_USER}
+      MYSQL_PASSWORD: ${USER_DB_PASSWORD}
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # Binary log stays ON (MySQL 8.4 default): ready for Debezium if user events are added later
+      - --binlog-row-image=FULL
+      - --server-id=3
+    ports:
+      - "127.0.0.1:${USER_MYSQL_PORT}:3306"
+    volumes:
+      - mysql-user-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- MySQL for order-service (database per service) --------------------
+  mysql-order:
+    image: mysql:${MYSQL_VERSION}
+    container_name: mysql-order
+    environment:
+      MYSQL_ROOT_PASSWORD: ${ORDER_MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${ORDER_DB_NAME}
+      MYSQL_USER: ${ORDER_DB_USER}
+      MYSQL_PASSWORD: ${ORDER_DB_PASSWORD}
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --binlog-row-image=FULL
+      - --server-id=4
+    ports:
+      - "127.0.0.1:${ORDER_MYSQL_PORT}:3306"
+    volumes:
+      - mysql-order-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- PostgreSQL + pgvector for rag-service --------------------
+  postgres-rag:
+    image: pgvector/pgvector:${PGVECTOR_VERSION}
+    container_name: postgres-rag
+    environment:
+      POSTGRES_DB: ${RAG_DB_NAME}
+      POSTGRES_USER: ${RAG_DB_USER}
+      POSTGRES_PASSWORD: ${RAG_DB_PASSWORD}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:${RAG_DB_PORT}:5432"
+    volumes:
+      - postgres-rag-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- pgAdmin 4: web UI for the vector database --------------------
+  # http://localhost:5050  ->  server "rag_db (postgres-rag, pgvector)" is preconfigured.
+  pgadmin:
+    image: dpage/pgadmin4:${PGADMIN_VERSION}
+    container_name: pgadmin
+    depends_on:
+      postgres-rag:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      # LOCAL DEV ONLY: "desktop mode" - no login screen, no master password prompt
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      # Quieter container log
+      PGADMIN_CONFIG_CONSOLE_LOG_LEVEL: "40"
+      GUNICORN_ACCESS_LOGFILE: "/dev/null"
+    ports:
+      - "127.0.0.1:${PGADMIN_PORT}:80"
+    volumes:
+      # Saved settings, query history and the remembered DB password
+      - pgadmin-data:/var/lib/pgadmin
+      # Connection to postgres-rag, imported on pgAdmin's FIRST start
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- Reranker (cross-encoder) for rag-service --------------------
+  # POST /rerank {"query": "...", "texts": [...]} -> relevance score per text.
+  # The model (~1 GB) is downloaded from Hugging Face on the FIRST start and cached in the volume.
+  reranker:
+    image: ${RERANKER_IMAGE}
+    container_name: reranker
+    command: ["--model-id", "${RERANKER_MODEL}"]
+    ports:
+      - "127.0.0.1:${RERANKER_PORT}:80"
+    volumes:
+      - reranker-data:/data
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- Redis: rate limiting for the API Gateway --------------------
+  # Holds one small token bucket per client and route. Shared by ALL gateway instances,
+  # so a client can't bypass its limit by hitting a different instance.
+  redis:
+    image: redis:${REDIS_VERSION}
+    container_name: redis
+    # No persistence needed: rate-limit counters only live for seconds.
+    # maxmemory + LRU: Redis can never grow without limit.
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- Kafka (KRaft mode, no ZooKeeper) --------------------
+  kafka:
+    image: confluentinc/cp-kafka:${CONFLUENT_VERSION}
+    container_name: kafka
+    environment:
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+      KAFKA_NODE_ID: 1
+      # One container acts as both broker and controller (fine for local dev)
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Two client listeners:
+      #   PLAINTEXT      kafka:29092     -> other containers (schema-registry, kafka-ui)
+      #   PLAINTEXT_HOST localhost:9092  -> Spring Boot apps running on your machine
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:${KAFKA_PORT}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Single broker => replication factor 1 (production: 3, with min.insync.replicas=2)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created explicitly by kafka-init, never by a typo in application code
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    ports:
+      - "127.0.0.1:${KAFKA_PORT}:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- Topics (one-time setup, exits when done) --------------------
+  kafka-init:
+    image: confluentinc/cp-kafka:${CONFLUENT_VERSION}
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    # Idempotent: --if-not-exists makes re-running safe.
+    # Partitions = 3 everywhere: events are keyed by orderId / sku, so all events of
+    # one order stay in order, while 3 consumers can work in parallel.
+    # DLTs have the same partition count as their source topic (Spring Kafka
+    # publishes a failed record to the SAME partition number in the DLT).
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        BS=kafka:29092
+        create() {
+          kafka-topics --bootstrap-server $$BS --create --if-not-exists --topic "$$1" \
+            --partitions 3 --replication-factor 1 --config "$$2"
+        }
+        # ----- business event topics (7 days retention) -----
+        create order.events.v1   retention.ms=604800000
+        create stock.events.v1   retention.ms=604800000
+        create payment.events.v1 retention.ms=604800000
+        # ----- product catalogue: COMPACTED = keeps the latest value per SKU forever -----
+        create product.catalog.v1 cleanup.policy=compact
+        # ----- dead letter topics: <source topic>.<consumer group>.dlt (14 days) -----
+        create order.events.v1.stock-service.dlt    retention.ms=1209600000
+        create stock.events.v1.order-service.dlt    retention.ms=1209600000
+        create product.catalog.v1.order-service.dlt retention.ms=1209600000
+        # ----- product CDC (Debezium -> product-service). Created here so it ALWAYS exists
+        #       before product-service subscribes. Compacted: latest change per product kept.
+        create cdc.product_db.product cleanup.policy=compact
+        create cdc.product_db.product.product-service.dlt retention.ms=1209600000
+        echo "Topics:"
+        kafka-topics --bootstrap-server $$BS --list
+    networks:
+      - platform-net
+    restart: "no"
+
+  # -------------------- Confluent Schema Registry --------------------
+  schema-registry:
+    image: confluentinc/cp-schema-registry:${CONFLUENT_VERSION}
+    container_name: schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      # Schemas are stored in the _schemas topic inside Kafka
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      # FULL_TRANSITIVE = every new schema version must be backward AND forward
+      # compatible with ALL previous versions. The registry rejects anything else.
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: full_transitive
+    ports:
+      - "127.0.0.1:${SCHEMA_REGISTRY_PORT}:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/subjects > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- Kafka Connect (Confluent image + Debezium MySQL plugin) --------------------
+  kafka-connect:
+    build:
+      context: ./kafka-connect
+      args:
+        CONFLUENT_VERSION: ${CONFLUENT_VERSION}
+        DEBEZIUM_VERSION: ${DEBEZIUM_VERSION}
+    image: product-platform/kafka-connect:${CONFLUENT_VERSION}-debezium-${DEBEZIUM_VERSION}
+    container_name: kafka-connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      mysql-product:
+        condition: service_healthy
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:29092
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: product-cdc-connect
+      # Connector configs, source offsets (= MySQL binlog position) and status live in
+      # these topics, so Debezium resumes exactly where it stopped after a restart.
+      CONNECT_CONFIG_STORAGE_TOPIC: _product_cdc_connect_configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _product_cdc_connect_offsets
+      CONNECT_STATUS_STORAGE_TOPIC: _product_cdc_connect_status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      # Defaults for all connectors (the connector JSON sets them explicitly as well):
+      #   key   = JSON {"id": "..."}   value = Avro, schema in Confluent Schema Registry
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+    ports:
+      - "127.0.0.1:${KAFKA_CONNECT_PORT}:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 45s
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+  # -------------------- Register the product CDC connector (one-time, exits) --------------------
+  # PUT .../config = "create or update": re-running this job is always safe.
+  debezium-init:
+    image: curlimages/curl:8.10.1
+    container_name: debezium-init
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+    volumes:
+      - ./debezium:/config:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        curl -fsS -X PUT -H "Content-Type: application/json" \
+          --data @/config/product-cdc-connector.json \
+          http://kafka-connect:8083/connectors/product-db-cdc/config
+        echo
+        sleep 5
+        curl -fsS http://kafka-connect:8083/connectors/product-db-cdc/status
+        echo
+    networks:
+      - platform-net
+    restart: "no"
+
+  # -------------------- Kafka UI (browse topics, messages, schemas) --------------------
+  kafka-ui:
+    image: kafbat/kafka-ui:${KAFKA_UI_VERSION}
+    container_name: kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      # Lets Kafka UI decode Avro messages into readable JSON
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      # Shows Debezium connectors (status, config, restart) in Kafka UI
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+    ports:
+      - "127.0.0.1:${KAFKA_UI_PORT}:8080"
+    networks:
+      - platform-net
+    restart: unless-stopped
+
+volumes:
+  es-data:
+    name: product-platform-es-data
+  ollama-data:
+    name: product-platform-ollama-data
+  mysql-data:
+    name: product-platform-mysql-data
+  mysql-product-data:
+    name: product-platform-mysql-product-data
+  mysql-user-data:
+    name: product-platform-mysql-user-data
+  mysql-order-data:
+    name: product-platform-mysql-order-data
+  postgres-rag-data:
+    name: product-platform-postgres-rag-data
+  reranker-data:
+    name: product-platform-reranker-data
+  pgadmin-data:
+    name: product-platform-pgadmin-data
+  kafka-data:
+    name: product-platform-kafka-data
+
+networks:
+  platform-net:
+    name: product-platform-net
+    driver: bridge

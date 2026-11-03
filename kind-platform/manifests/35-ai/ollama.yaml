@@ -1,0 +1,93 @@
+# =============================================================================
+# Ollama - runs the LLM (qwen2.5:7b) and the embedding model (nomic-embed-text) on CPU.
+# Replaces compose "ollama". The downloaded models (several GB) live on a PVC, so they
+# survive restarts; the ollama-models Job downloads them once.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-models
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/part-of: product-platform
+data:
+  # Shared by the ollama-models Job, rag-service and mcp-client (one place to change a model).
+  # Low on memory? qwen2.5:3b needs ~2.5 GB instead of ~5.5 GB (weaker tool calling).
+  OLLAMA_CHAT_MODEL: "qwen2.5:7b"
+  OLLAMA_EMBEDDING_MODEL: "nomic-embed-text"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/component: ai
+    app.kubernetes.io/part-of: product-platform
+spec:
+  selector:
+    app.kubernetes.io/name: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ollama
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/component: ai
+    app.kubernetes.io/part-of: product-platform
+spec:
+  serviceName: ollama
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ollama
+        app.kubernetes.io/component: ai
+        app.kubernetes.io/part-of: product-platform
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: ollama
+          image: ollama/ollama:0.12.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 11434
+          env:
+            - name: OLLAMA_KEEP_ALIVE
+              value: "30m"
+            - name: OLLAMA_CONTEXT_LENGTH
+              value: "8192"
+          resources:
+            requests: { cpu: "1", memory: 4Gi }
+            limits: { memory: 7Gi }            # qwen2.5:7b + context on CPU
+          readinessProbe:
+            httpGet: { path: /, port: http }   # "Ollama is running"
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6                # busy generating = slow, not dead
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+  volumeClaimTemplates:
+    - metadata:
+        name: models
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 15Gi

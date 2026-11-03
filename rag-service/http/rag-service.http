@@ -1,0 +1,172 @@
+### RAG Service - example requests (IntelliJ HTTP Client)
+### Start: docker compose (postgres-rag, reranker, ollama) -> eureka-server -> rag-service
+### Through the gateway: {{rag}} = http://localhost:8080/api/v1/rag  (direct: http://localhost:8093/api/v1/rag)
+### Sample files are in ../samples (all FAKE company documents).
+
+@rag = http://localhost:8080/api/v1/rag
+
+### 0. Health - expect "db" UP
+GET http://localhost:8093/actuator/health
+
+### ===================== UPLOAD (multipart/form-data) =====================
+### Each upload returns 202 with "status": "PROCESSING"; indexing runs in the background.
+
+### 1. Warranty policy (Markdown) - category "warranty"
+POST {{rag}}/documents
+Content-Type: multipart/form-data; boundary=RagBoundary
+
+--RagBoundary
+Content-Disposition: form-data; name="file"; filename="warranty-policy.md"
+Content-Type: text/markdown
+
+< ../samples/warranty-policy.md
+--RagBoundary
+Content-Disposition: form-data; name="category"
+
+warranty
+--RagBoundary--
+
+> {% client.global.set("warrantyDocId", response.body.id); %}
+
+### 2. Return policy (plain text) - category "policies"
+POST {{rag}}/documents
+Content-Type: multipart/form-data; boundary=RagBoundary
+
+--RagBoundary
+Content-Disposition: form-data; name="file"; filename="return-policy.txt"
+Content-Type: text/plain
+
+< ../samples/return-policy.txt
+--RagBoundary
+Content-Disposition: form-data; name="category"
+
+policies
+--RagBoundary--
+
+### 3. Shipping FAQ (3-page PDF) - category "shipping"; answers can cite page numbers
+POST {{rag}}/documents
+Content-Type: multipart/form-data; boundary=RagBoundary
+
+--RagBoundary
+Content-Disposition: form-data; name="file"; filename="shipping-faq.pdf"
+Content-Type: application/pdf
+
+< ../samples/shipping-faq.pdf
+--RagBoundary
+Content-Disposition: form-data; name="category"
+
+shipping
+--RagBoundary
+Content-Disposition: form-data; name="title"
+
+Shipping FAQ 2026
+--RagBoundary--
+
+### 4. Troubleshooting guide (Markdown) - category "support"
+POST {{rag}}/documents
+Content-Type: multipart/form-data; boundary=RagBoundary
+
+--RagBoundary
+Content-Disposition: form-data; name="file"; filename="troubleshooting-guide.md"
+Content-Type: text/markdown
+
+< ../samples/troubleshooting-guide.md
+--RagBoundary
+Content-Disposition: form-data; name="category"
+
+support
+--RagBoundary--
+
+### 5. Status - wait until all 4 are "READY" (usually a few seconds each)
+GET {{rag}}/documents
+
+### 6. One document
+GET {{rag}}/documents/{{warrantyDocId}}
+
+### ===================== SEARCH (retrieval only) =====================
+### Look at "diagnostics": vectorHits, keywordHits, afterFusion, afterMetadataFilter, reranked.
+
+### 7. Meaning-based: no word "refund" needed - the VECTOR leg finds the return policy
+POST {{rag}}/search
+Content-Type: application/json
+
+{ "query": "Can I get my money back for headphones I already opened?" }
+
+### 8. Exact code: the KEYWORD leg finds "E-4012" even though it has no semantic meaning
+POST {{rag}}/search
+Content-Type: application/json
+
+{ "query": "E-4012", "topK": 3 }
+
+### 9. METADATA FILTER: only the "shipping" category - expect chunks from shipping-faq.pdf only
+POST {{rag}}/search
+Content-Type: application/json
+
+{ "query": "How long does delivery take?", "filters": { "category": "shipping" } }
+
+### 10. Filter by file type
+POST {{rag}}/search
+Content-Type: application/json
+
+{ "query": "What is covered?", "filters": { "fileType": "md" } }
+
+### ===================== QUERY (retrieval + answer) =====================
+
+### 11. Answer with citations - expect "2-year limited warranty" [1] and "sources"
+POST {{rag}}/query
+Content-Type: application/json
+
+{ "question": "How long is the warranty on laptops and what does CarePlus cost?" }
+
+### 12. PDF page citation - expect $29 and a source with "pageNumber": 2
+POST {{rag}}/query
+Content-Type: application/json
+
+{ "question": "How much does international shipping cost?" }
+
+### 13. Not in the documents - expect "answered": false, NO invented answer
+POST {{rag}}/query
+Content-Type: application/json
+
+{ "question": "What is the CEO's favourite colour?" }
+
+### ===================== ERRORS =====================
+
+### 14. Same file again - expect 409 "Duplicate document" with "existingDocumentId"
+POST {{rag}}/documents
+Content-Type: multipart/form-data; boundary=RagBoundary
+
+--RagBoundary
+Content-Disposition: form-data; name="file"; filename="warranty-policy.md"
+Content-Type: text/markdown
+
+< ../samples/warranty-policy.md
+--RagBoundary--
+
+### 15. Unsupported type - expect 400 "Unsupported file type '.exe'"
+POST {{rag}}/documents
+Content-Type: multipart/form-data; boundary=RagBoundary
+
+--RagBoundary
+Content-Disposition: form-data; name="file"; filename="setup.exe"
+Content-Type: application/octet-stream
+
+fake binary
+--RagBoundary--
+
+### 16. Invalid search - expect 400 with errors for query and topK
+POST {{rag}}/search
+Content-Type: application/json
+
+{ "query": "", "topK": 50 }
+
+### ===================== DELETE =====================
+
+### 17. Delete the warranty policy - expect 204; its chunks disappear from search
+DELETE {{rag}}/documents/{{warrantyDocId}}
+
+### 18. Ask again - expect "answered": false (the document is gone)
+POST {{rag}}/query
+Content-Type: application/json
+
+{ "question": "What does CarePlus cost?" }

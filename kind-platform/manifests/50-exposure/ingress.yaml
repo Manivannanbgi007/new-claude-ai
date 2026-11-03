@@ -1,0 +1,34 @@
+# =============================================================================
+# Option B: Ingress - HTTP routing by host name through the NGINX Ingress Controller.
+#   http://platform.localtest.me   (*.localtest.me always resolves to 127.0.0.1)
+# Requires the controller (GUIDE.md step 18). All traffic goes to the api-gateway,
+# which does the routing to the services - the Ingress is only the "front door".
+#
+# Annotations are for F5's NGINX Ingress Controller (prefix nginx.org/).
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: product-platform
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/part-of: product-platform
+  annotations:
+    # The chatbot and RAG answers can take up to 2 minutes (gateway timeout: 130 s)
+    nginx.org/proxy-read-timeout: "135s"
+    nginx.org/proxy-send-timeout: "135s"
+    # Document uploads up to 20 MB (rag-service limit)
+    nginx.org/client-max-body-size: "25m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: platform.localtest.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  name: http

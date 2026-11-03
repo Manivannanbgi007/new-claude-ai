@@ -1,0 +1,104 @@
+spring:
+  application:
+    name: user-service
+
+  datasource:
+    # Dedicated MySQL container "mysql-user" (USER_MYSQL_PORT=3309 in infrastructure/.env)
+    url: ${USER_DB_URL:jdbc:mysql://localhost:3309/user_db?connectionTimeZone=UTC}
+    username: ${USER_DB_USERNAME:user_user}
+    password: ${USER_DB_PASSWORD:user_dev_password}
+    hikari:
+      pool-name: user-db-pool
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 5000
+      max-lifetime: 1800000
+      leak-detection-threshold: 20000
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema; Hibernate only checks entities against it.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: 8092
+  forward-headers-strategy: framework
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8762/eureka/}
+  instance:
+    instance-id: ${spring.application.name}:${server.port}
+    hostname: localhost
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: User management service backed by MySQL
+
+logging:
+  # ================= Centralized logging (same block in every service) =================
+  # Console: human-readable (pattern below). File: one JSON object per line (ECS format)
+  # in a folder SHARED by all services -> a log shipper (e.g. Grafana Alloy) can later send
+  # every service's logs to Grafana Loki without any code change.
+  file:
+    # product-platform/logs/<service-name>.log  (override the folder with env var LOG_DIR)
+    name: ${LOG_DIR:../logs}/${spring.application.name}.log
+  structured:
+    format:
+      # JSON for the file only. In containers, also set LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs
+      # (JSON on stdout is what container log collectors read).
+      file: ecs
+    ecs:
+      service:
+        # These four fields are added to EVERY log line: filter by service/environment in Loki
+        name: ${spring.application.name}
+        version: "0.0.1-SNAPSHOT"
+        environment: ${APP_ENVIRONMENT:local}
+        node-name: ${HOSTNAME:${COMPUTERNAME:unknown}}
+  logback:
+    rollingpolicy:
+      # New file every day or at 50 MB; old files are gzipped and deleted after 7 days.
+      # total-size-cap: the log folder of ONE service can never grow beyond 1 GB.
+      max-file-size: 50MB
+      max-history: 7
+      total-size-cap: 1GB
+  pattern:
+    level: "%5p [%X{correlationId:-}]"
+  level:
+    com.example.user: INFO
+    # Uncomment to see the SQL Hibernate runs:
+    # org.hibernate.SQL: DEBUG
+
+# ================= OpenAPI / Swagger =================
+# This service only GENERATES its API description at /v3/api-docs.
+# The Swagger UI for ALL services is on the gateway: http://localhost:8080/swagger-ui.html
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  # Only the business API (no /actuator, no /error)
+  paths-to-match: /api/v1/**
+  show-actuator: false
+  default-produces-media-type: application/json

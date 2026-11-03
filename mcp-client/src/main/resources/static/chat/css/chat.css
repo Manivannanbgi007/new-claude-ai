@@ -1,0 +1,564 @@
+/* ------------------------------------------------------------------
+   Product assistant chat UI
+   Colour idea: a cool steel-grey "equipment" palette with one amber
+   signal colour, like the status LED on electronic devices. The amber
+   marks the assistant: steady when idle, pulsing while it thinks.
+   ------------------------------------------------------------------ */
+
+:root {
+    --bg: #E9EDF1;          /* steel grey page */
+    --surface: #FFFFFF;     /* input, cards */
+    --ink: #16222E;         /* main text */
+    --muted: #5B6875;       /* secondary text */
+    --line: #CBD3DB;        /* borders */
+    --user: #1E3A5F;        /* user bubble, primary button */
+    --user-ink: #F4F7FA;
+    --signal: #C98204;      /* amber status LED */
+    --error: #B3261E;
+    --error-bg: #FBEAE8;
+    --focus: #2F6FB3;
+
+    --font: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --radius-bubble: 14px;
+    --radius-control: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #0F1720;
+        --surface: #17212C;
+        --ink: #E6ECF2;
+        --muted: #93A1AE;
+        --line: #2A3846;
+        --user: #2B4F7A;
+        --user-ink: #F4F7FA;
+        --signal: #F2B33D;
+        --error: #FF8A80;
+        --error-bg: #3A1D1B;
+        --focus: #7FB2E8;
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+/* The "hidden" attribute must always win - even over classes that set "display"
+   (e.g. .button-mic). Without this, hidden voice buttons would still show. */
+[hidden] {
+    display: none !important;
+}
+
+html, body {
+    height: 100%;
+    margin: 0;
+}
+
+body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: 16px;
+    line-height: 1.5;
+}
+
+/* ---------------- Layout: header / messages / composer ---------------- */
+
+.app {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+.app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 20px 0 16px;
+    border-bottom: 1px solid var(--line);
+}
+
+.app-header h1 {
+    margin: 0;
+    font-size: 1.375rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+.app-subtitle {
+    margin: 2px 0 0;
+    color: var(--muted);
+    font-size: 0.875rem;
+}
+
+.messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+/* ---------------- Empty state ---------------- */
+
+.empty-state {
+    margin: auto 0;
+    padding: 8px 0;
+}
+
+.empty-state h2 {
+    margin: 0 0 6px;
+    font-size: 1.75rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+}
+
+.empty-state p {
+    margin: 0 0 20px;
+    color: var(--muted);
+    max-width: 60ch;
+}
+
+.suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.suggestion {
+    font: inherit;
+    font-size: 0.9375rem;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 8px 14px;
+    cursor: pointer;
+    text-align: left;
+}
+
+.suggestion:hover {
+    border-color: var(--user);
+}
+
+/* ---------------- Messages ---------------- */
+
+.message {
+    max-width: 100%;
+}
+
+/* User: navy bubble on the right */
+.message-user {
+    align-self: flex-end;
+    max-width: 80%;
+    background: var(--user);
+    color: var(--user-ink);
+    padding: 10px 14px;
+    border-radius: var(--radius-bubble) var(--radius-bubble) 4px var(--radius-bubble);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* Assistant: plain text column with the amber signal LED */
+.message-assistant {
+    align-self: stretch;
+    display: grid;
+    grid-template-columns: 10px 1fr;
+    column-gap: 14px;
+}
+
+.signal {
+    width: 10px;
+    height: 10px;
+    margin-top: 7px;
+    border-radius: 50%;
+    background: var(--signal);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 22%, transparent);
+}
+
+.message-assistant.is-thinking .signal {
+    animation: pulse 1.2s ease-in-out infinite;
+}
+
+.message-assistant.is-error .signal {
+    background: var(--error);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--error) 22%, transparent);
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.25; }
+}
+
+.message-body {
+    min-width: 0;
+    max-width: 68ch;
+    overflow-wrap: anywhere;
+}
+
+.message-body p {
+    margin: 0 0 10px;
+}
+
+.message-body p:last-child,
+.message-body ul:last-child,
+.message-body ol:last-child {
+    margin-bottom: 0;
+}
+
+.message-body ul,
+.message-body ol {
+    margin: 0 0 10px;
+    padding-left: 22px;
+}
+
+.message-body li {
+    margin-bottom: 4px;
+}
+
+.message-body strong {
+    font-weight: 600;
+}
+
+.thinking-text {
+    color: var(--muted);
+}
+
+.message-meta {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 0.8125rem;
+}
+
+.message-assistant.is-error .message-body {
+    background: var(--error-bg);
+    color: var(--error);
+    padding: 10px 14px;
+    border-radius: var(--radius-control);
+}
+
+/* ---------------- Composer ---------------- */
+
+.composer {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 8px 10px;
+    padding: 12px 0 16px;
+    border-top: 1px solid var(--line);
+}
+
+.composer textarea {
+    font: inherit;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-control);
+    padding: 10px 12px;
+    resize: none;
+    max-height: 180px;
+    line-height: 1.4;
+}
+
+.composer textarea::placeholder {
+    color: var(--muted);
+}
+
+.composer-hint {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: space-between;
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.8125rem;
+}
+
+.char-count.is-near-limit {
+    color: var(--error);
+}
+
+/* ---------------- Voice ---------------- */
+
+.header-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.button-mic {
+    align-self: end;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-control);
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink);
+    cursor: pointer;
+}
+
+.button-mic:hover {
+    border-color: var(--user);
+}
+
+.button-mic:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Listening: the mic turns amber and pulses - the same "signal" as the assistant */
+.button-mic.is-listening {
+    background: var(--signal);
+    border-color: var(--signal);
+    color: #1b1300;
+    animation: pulse 1.2s ease-in-out infinite;
+}
+
+#speak-toggle[aria-pressed="true"] {
+    border-color: var(--signal);
+    color: var(--ink);
+    background: color-mix(in srgb, var(--signal) 18%, transparent);
+}
+
+.voice-status {
+    grid-column: 1 / -1;
+    margin: 0;
+    font-size: 0.875rem;
+    color: var(--muted);
+}
+
+.voice-status.is-warning {
+    color: var(--ink);
+    background: color-mix(in srgb, var(--signal) 18%, transparent);
+    border-radius: var(--radius-control);
+    padding: 6px 10px;
+}
+
+.voice-status.is-error {
+    color: var(--error);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .button-mic.is-listening {
+        animation: none;
+    }
+}
+
+/* ---------------- Documents panel (knowledge base) ---------------- */
+
+.documents-panel {
+    border-bottom: 1px solid var(--line);
+    padding: 16px 0;
+    max-height: 45dvh;
+    overflow-y: auto;
+}
+
+.upload-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 10px;
+}
+
+.upload-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.8125rem;
+    color: var(--muted);
+    flex: 1 1 260px;
+}
+
+.upload-category {
+    flex: 0 1 180px;
+}
+
+.upload-field input {
+    font: inherit;
+    font-size: 0.9375rem;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-control);
+    padding: 8px 10px;
+}
+
+.upload-status {
+    margin: 10px 0 0;
+    font-size: 0.875rem;
+    color: var(--muted);
+}
+
+.upload-status.is-error {
+    color: var(--error);
+}
+
+.document-list {
+    list-style: none;
+    margin: 12px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.document-item {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 10px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-control);
+    padding: 8px 12px;
+    font-size: 0.9375rem;
+}
+
+.document-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.document-meta {
+    color: var(--muted);
+    font-size: 0.8125rem;
+}
+
+.document-status {
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    border-radius: 999px;
+    padding: 2px 8px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+}
+
+.document-status.is-ready {
+    color: var(--ink);
+    border-color: var(--signal);
+}
+
+.document-status.is-failed {
+    color: var(--error);
+    border-color: var(--error);
+}
+
+.document-delete {
+    font: inherit;
+    font-size: 0.8125rem;
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.document-delete:hover {
+    color: var(--error);
+}
+
+.document-empty {
+    color: var(--muted);
+    font-size: 0.875rem;
+}
+
+/* ---------------- Buttons ---------------- */
+
+.button-primary,
+.button-secondary {
+    font: inherit;
+    font-weight: 500;
+    border-radius: var(--radius-control);
+    padding: 10px 18px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.button-primary {
+    align-self: end;
+    background: var(--user);
+    color: var(--user-ink);
+    border: 1px solid var(--user);
+}
+
+.button-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.button-secondary {
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--line);
+}
+
+.button-secondary:hover {
+    border-color: var(--ink);
+}
+
+/* ---------------- Accessibility ---------------- */
+
+:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .message-assistant.is-thinking .signal {
+        animation: none;
+    }
+}
+
+/* ---------------- Small screens ---------------- */
+
+@media (max-width: 520px) {
+    .app {
+        padding: 0 14px;
+    }
+
+    .message-user {
+        max-width: 90%;
+    }
+
+    .empty-state h2 {
+        font-size: 1.5rem;
+    }
+
+    .composer-hint span:first-child {
+        display: none;
+    }
+
+    /* Title on top, buttons below it: two header buttons don't fit next to the title */
+    .app-header {
+        flex-wrap: wrap;
+        align-items: flex-start;
+    }
+
+    .header-actions {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+
+    .header-actions .button-secondary {
+        flex: 1 1 auto;
+        padding: 8px 10px;
+        font-size: 0.9375rem;
+    }
+}

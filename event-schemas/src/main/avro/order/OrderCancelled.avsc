@@ -1,0 +1,23 @@
+{
+  "type": "record",
+  "name": "OrderCancelled",
+  "namespace": "com.example.events.order",
+  "doc": "Owner: order-service. Topic: order.events.v1, key = orderId. The order was cancelled after stock was reserved; stock-service releases the reservation (compensation).",
+  "fields": [
+    { "name": "eventId", "type": "string" },
+    { "name": "occurredAt", "type": { "type": "long", "logicalType": "timestamp-millis" } },
+    { "name": "correlationId", "type": ["null", "string"], "default": null },
+    { "name": "orderId", "type": "string" },
+    {
+      "name": "reason",
+      "doc": "The enum 'default' keeps OLD consumers working when NEW symbols are added: an unknown symbol is read as UNKNOWN (forward compatibility).",
+      "type": {
+        "type": "enum",
+        "name": "OrderCancellationReason",
+        "symbols": ["UNKNOWN", "CUSTOMER_REQUEST", "PAYMENT_FAILED"],
+        "default": "UNKNOWN"
+      },
+      "default": "UNKNOWN"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\src\main\java\com\example\events\EventTopics.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\order\OrderCancellationReason.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\order\OrderCancelled.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\order\OrderConfirmed.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\order\OrderCreated.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\order\OrderLine.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\product\ProductSnapshot.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\stock\ReservedLine.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\stock\StockFailureReason.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\stock\StockReleased.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\stock\StockReservationFailed.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\stock\StockReserved.java
+D:\Drive E\dev\sep_2026\new-claude-ai\event-schemas\target\generated-sources\avro\com\example\events\stock\StockShortageLine.java

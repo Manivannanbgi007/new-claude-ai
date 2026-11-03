@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# event-schemas - schema REGISTRATION image
+#
+# event-schemas is a LIBRARY, not a running application. This small image has one
+# job: register the Avro schemas (src/main/avro/**) in Schema Registry, using the
+# kafka-schema-registry-maven-plugin that is already configured in pom.xml.
+# It is run by the Kubernetes Job in schema-registration-job.yaml - once per release.
+#
+# Build (from the product-platform folder):
+#   docker build -f kind-platform/docker/Dockerfile.event-schemas-registration -t event-schemas-registration:1.0.0 event-schemas
+# =============================================================================
+FROM maven:3.9-eclipse-temurin-21
+
+# Non-root user with its own local Maven repository
+RUN groupadd -g 1001 schemas && useradd -u 1001 -g schemas -m schemas
+WORKDIR /schemas
+COPY --chown=1001:1001 pom.xml .
+COPY --chown=1001:1001 src ./src
+USER 1001:1001
+
+# Download the plugin and its dependencies at BUILD time, so the Job starts quickly.
+RUN mvn -B -q dependency:resolve-plugins
+
+# The registry URL comes from the Job (-Dschema.registry.url=...).
+# test-compatibility first: an incompatible schema fails the Job BEFORE anything is registered.
+ENTRYPOINT ["mvn", "-B", "schema-registry:test-compatibility", "schema-registry:register"]

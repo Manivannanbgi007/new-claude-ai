@@ -1,0 +1,125 @@
+spring:
+  application:
+    name: mcp-client
+  ai:
+    # ---------------- Ollama (the LLM) ----------------
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      init:
+        # The model is downloaded by docker compose (ollama-model-init), not by this app
+        pull-model-strategy: never
+      chat:
+        options:
+          model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}
+          # Low temperature = more predictable tool calls and fewer invented facts
+          temperature: 0.1
+          # Context window in tokens: system prompt + history + tool definitions + tool results
+          num-ctx: 8192
+
+    # ---------------- MCP client ----------------
+    mcp:
+      client:
+        name: product-chatbot
+        version: 1.0.0
+        type: SYNC
+        # Max wait for one MCP request (e.g. a tools/call)
+        request-timeout: 30s
+        # Expose the MCP server's tools as Spring AI ToolCallbacks
+        toolcallback:
+          enabled: true
+        streamable-http:
+          connections:
+            # Any name; it identifies this connection in logs
+            product-mcp-server:
+              url: ${MCP_SERVER_URL:http://localhost:8090}
+              endpoint: /mcp
+
+    # Spring AI retries failed LLM calls. The default (10 attempts) makes a
+    # stopped Ollama look like a hanging app, so keep it short.
+    retry:
+      max-attempts: 2
+      backoff:
+        initial-interval: 1s
+        multiplier: 2
+        max-interval: 5s
+
+server:
+  port: 8091
+  forward-headers-strategy: framework
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8762/eureka/}
+  instance:
+    instance-id: ${spring.application.name}:${server.port}
+    hostname: localhost
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: Chatbot using Ollama and the product MCP server
+
+app:
+  chat:
+    # How many messages (user + assistant) of one conversation the LLM sees.
+    # 20 = the last 10 question/answer pairs. More history = more tokens = slower.
+    memory-max-messages: 20
+
+logging:
+  # ================= Centralized logging (same block in every service) =================
+  # Console: human-readable (pattern below). File: one JSON object per line (ECS format)
+  # in a folder SHARED by all services -> a log shipper (e.g. Grafana Alloy) can later send
+  # every service's logs to Grafana Loki without any code change.
+  file:
+    # product-platform/logs/<service-name>.log  (override the folder with env var LOG_DIR)
+    name: ${LOG_DIR:../logs}/${spring.application.name}.log
+  structured:
+    format:
+      # JSON for the file only. In containers, also set LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs
+      # (JSON on stdout is what container log collectors read).
+      file: ecs
+    ecs:
+      service:
+        # These four fields are added to EVERY log line: filter by service/environment in Loki
+        name: ${spring.application.name}
+        version: "@project.version@"
+        environment: ${APP_ENVIRONMENT:local}
+        node-name: ${HOSTNAME:${COMPUTERNAME:unknown}}
+  logback:
+    rollingpolicy:
+      # New file every day or at 50 MB; old files are gzipped and deleted after 7 days.
+      # total-size-cap: the log folder of ONE service can never grow beyond 1 GB.
+      max-file-size: 50MB
+      max-history: 7
+      total-size-cap: 1GB
+  pattern:
+    level: "%5p [%X{correlationId:-}]"
+  level:
+    com.example.mcpclient: INFO
+    # DEBUG prints the full prompt sent to Ollama and the answer (great for learning,
+    # very verbose). SimpleLoggerAdvisor is registered in ChatClientConfig.
+    org.springframework.ai.chat.client.advisor: INFO
+
+# ================= OpenAPI / Swagger =================
+# This service only GENERATES its API description at /v3/api-docs.
+# The Swagger UI for ALL services is on the gateway: http://localhost:8080/swagger-ui.html
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  # Only the business API (no /actuator, no /error)
+  paths-to-match: /api/v1/**
+  show-actuator: false
+  default-produces-media-type: application/json

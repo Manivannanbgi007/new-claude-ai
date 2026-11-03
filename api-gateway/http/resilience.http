@@ -1,0 +1,43 @@
+### API Gateway - resilience checks (IntelliJ HTTP Client)
+### Parallel tests (rate limit, bulkhead, circuit breaker): scripts\resilience-tests.ps1
+
+@gw = http://localhost:8080
+@demoUserId = 7c9e6679-7425-40de-944b-e07fc1f90ae7
+
+### 1. Circuit breakers + bulkheads right now
+#    Circuit breakers appear after their route received the first request.
+GET {{gw}}/actuator/resilience
+
+### 2. Rate-limit headers - see X-RateLimit-Remaining / -Burst-Capacity / -Replenish-Rate
+GET {{gw}}/api/v1/stock/LAP-APL-001/availability
+
+### 3. Rate limit per USER: same request with X-User-Id uses that user's own bucket
+GET {{gw}}/api/v1/stock/LAP-APL-001/availability
+X-User-Id: {{demoUserId}}
+
+### 4. /fallback is internal - called directly it is a 404
+GET {{gw}}/fallback/product-read
+
+### 5. Business errors are NOT failures: 404 passes through, the breaker stays CLOSED
+GET {{gw}}/api/v1/orders/00000000-0000-0000-0000-000000000000
+
+### 6. Validation errors are NOT failures either (400 passes through)
+GET {{gw}}/api/v1/users?size=500
+
+### ---- With product-service STOPPED (read side down) ----
+
+### 7. Search -> 503 fallback: "service": "product-read", "reason": "BACKEND_ERROR" / "CIRCUIT_OPEN", Retry-After: 15
+GET {{gw}}/api/v1/products?q=laptop
+
+### 8. Get by id -> 200 from the WRITE side, header X-Fallback-Source: product-write-service
+#    Paste a product id (e.g. from GET http://localhost:8089/... or mysql-product)
+GET {{gw}}/api/v1/products/PASTE-PRODUCT-ID
+
+### ---- With order-service STOPPED ----
+
+### 9. A WRITE that fails: 503 "Nothing was changed by this request." - and it is NOT retried
+POST {{gw}}/api/v1/orders
+Content-Type: application/json
+X-User-Id: {{demoUserId}}
+
+{ "userId": "{{demoUserId}}", "items": [ { "sku": "AUD-APL-001", "quantity": 1 } ] }

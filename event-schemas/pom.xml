@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        event-schemas: the SHARED EVENT CONTRACT of the platform.
+        A plain JAR library (not a Spring Boot app, not a WAR):
+          - src/main/avro/**.avsc   the schemas (single source of truth)
+          - generated Java classes  (OrderCreated, StockReserved, ...)
+          - EventTopics             topic names
+        Services depend on it like any other library.
+    -->
+    <groupId>com.example</groupId>
+    <artifactId>event-schemas</artifactId>
+    <!-- Bump the MINOR version for every compatible schema change (1.1.0, 1.2.0 ...) -->
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>event-schemas</name>
+    <description>Avro event schemas and topic names shared by all services</description>
+
+    <properties>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- Avro version used by Confluent Platform 8.0 serializers -->
+        <avro.version>1.12.0</avro.version>
+        <confluent.version>8.0.0</confluent.version>
+        <!-- Schema Registry from docker compose (host port 18081) -->
+        <schema.registry.url>http://localhost:18081</schema.registry.url>
+    </properties>
+
+    <!-- Confluent artifacts (the schema registry Maven plugin) are not on Maven Central -->
+    <pluginRepositories>
+        <pluginRepository>
+            <id>confluent</id>
+            <url>https://packages.confluent.io/maven/</url>
+        </pluginRepository>
+    </pluginRepositories>
+
+    <dependencies>
+        <!-- Runtime library needed by the generated classes -->
+        <dependency>
+            <groupId>org.apache.avro</groupId>
+            <artifactId>avro</artifactId>
+            <version>${avro.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+
+            <!-- 1. Generates Java classes from the .avsc files during every build -->
+            <plugin>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro-maven-plugin</artifactId>
+                <version>${avro.version}</version>
+                <executions>
+                    <execution>
+                        <id>generate-avro-classes</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>schema</goal>
+                        </goals>
+                        <configuration>
+                            <sourceDirectory>${project.basedir}/src/main/avro</sourceDirectory>
+                            <outputDirectory>${project.build.directory}/generated-sources/avro</outputDirectory>
+                            <!-- java.lang.String instead of Avro's Utf8/CharSequence -->
+                            <stringType>String</stringType>
+                            <!-- decimal logical type -> java.math.BigDecimal -->
+                            <enableDecimalLogicalType>true</enableDecimalLogicalType>
+                            <fieldVisibility>PRIVATE</fieldVisibility>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+                2. Talks to Schema Registry. Not bound to the build; run it explicitly:
+                     mvn schema-registry:test-compatibility   (is my change compatible?)
+                     mvn schema-registry:register             (publish the schemas)
+                Subject names follow TopicRecordNameStrategy: <topic>-<record full name>.
+                That strategy lets one topic carry several event types
+                (OrderCreated, OrderConfirmed, OrderCancelled) while each type
+                keeps its own compatibility history.
+            -->
+            <plugin>
+                <groupId>io.confluent</groupId>
+                <artifactId>kafka-schema-registry-maven-plugin</artifactId>
+                <version>${confluent.version}</version>
+                <configuration>
+                    <schemaRegistryUrls>
+                        <param>${schema.registry.url}</param>
+                    </schemaRegistryUrls>
+                    <subjects>
+                        <order.events.v1-com.example.events.order.OrderCreated>src/main/avro/order/OrderCreated.avsc</order.events.v1-com.example.events.order.OrderCreated>
+                        <order.events.v1-com.example.events.order.OrderConfirmed>src/main/avro/order/OrderConfirmed.avsc</order.events.v1-com.example.events.order.OrderConfirmed>
+                        <order.events.v1-com.example.events.order.OrderCancelled>src/main/avro/order/OrderCancelled.avsc</order.events.v1-com.example.events.order.OrderCancelled>
+                        <stock.events.v1-com.example.events.stock.StockReserved>src/main/avro/stock/StockReserved.avsc</stock.events.v1-com.example.events.stock.StockReserved>
+                        <stock.events.v1-com.example.events.stock.StockReservationFailed>src/main/avro/stock/StockReservationFailed.avsc</stock.events.v1-com.example.events.stock.StockReservationFailed>
+                        <stock.events.v1-com.example.events.stock.StockReleased>src/main/avro/stock/StockReleased.avsc</stock.events.v1-com.example.events.stock.StockReleased>
+                        <product.catalog.v1-com.example.events.product.ProductSnapshot>src/main/avro/product/ProductSnapshot.avsc</product.catalog.v1-com.example.events.product.ProductSnapshot>
+                    </subjects>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

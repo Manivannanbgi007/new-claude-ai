@@ -1,0 +1,93 @@
+# =============================================================================
+# Registers the Debezium connector "product-db-cdc" - replaces compose "debezium-init".
+# PUT .../config creates OR updates the connector -> running it again is harmless.
+# The connector config contains the Debezium DB password -> stored in a Secret.
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: debezium-connector-config
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: debezium-connector
+    app.kubernetes.io/part-of: product-platform
+type: Opaque
+stringData:
+  # Same as infrastructure/debezium/product-cdc-connector.json, with Kubernetes host names:
+  #   mysql-product (Service), kafka:9092 (instead of kafka:29092), schema-registry:8081
+  product-cdc-connector.json: |
+    {
+      "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+      "tasks.max": "1",
+      "database.hostname": "mysql-product",
+      "database.port": "3306",
+      "database.user": "debezium",
+      "database.password": "debezium_dev_password",
+      "database.allowPublicKeyRetrieval": "true",
+      "database.server.id": "184054",
+      "topic.prefix": "cdc",
+      "database.include.list": "product_db",
+      "table.include.list": "product_db.product",
+      "snapshot.mode": "initial",
+      "decimal.handling.mode": "string",
+      "time.precision.mode": "connect",
+      "tombstones.on.delete": "true",
+      "include.schema.changes": "false",
+      "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+      "schema.history.internal.kafka.topic": "cdc.schema-history.product-db",
+      "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+      "key.converter.schemas.enable": "false",
+      "value.converter": "io.confluent.connect.avro.AvroConverter",
+      "value.converter.schema.registry.url": "http://schema-registry:8081",
+      "topic.creation.default.partitions": "3",
+      "topic.creation.default.replication.factor": "1",
+      "topic.creation.default.cleanup.policy": "compact"
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: debezium-connector
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: debezium-connector
+    app.kubernetes.io/part-of: product-platform
+spec:
+  backoffLimit: 5
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: debezium-connector
+        app.kubernetes.io/part-of: product-platform
+    spec:
+      enableServiceLinks: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100                       # "curl_user" of the curlimages/curl image
+      containers:
+        - name: register-connector
+          image: curlimages/curl:8.10.1
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              until curl -fsS http://kafka-connect:8083/connectors >/dev/null; do echo "waiting for kafka-connect"; sleep 5; done
+              curl -fsS -X PUT -H "Content-Type: application/json" \
+                --data @/config/product-cdc-connector.json \
+                http://kafka-connect:8083/connectors/product-db-cdc/config
+              echo; sleep 5
+              curl -fsS http://kafka-connect:8083/connectors/product-db-cdc/status; echo
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          secret:
+            secretName: debezium-connector-config

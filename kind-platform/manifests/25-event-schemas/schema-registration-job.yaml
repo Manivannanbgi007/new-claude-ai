@@ -1,0 +1,88 @@
+# event-schemas: registers the Avro schemas in Schema Registry (step 7 of GUIDE.md).
+#
+# event-schemas is a library: there is no Deployment and no Service for it.
+# Its only RUNTIME task is registering the Avro schemas in Schema Registry - a task
+# that runs once and finishes. That is exactly what a Kubernetes Job is for.
+#
+# Run it on every new event-schemas release, BEFORE deploying the services that
+# produce the new events (order-service, stock-service, product-write-service).
+#
+#   kubectl apply -f k8s/event-schemas/schema-registration-job.yaml
+#   kubectl -n product-platform logs -f job/event-schemas-registration-1-0-0
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: event-schemas-config
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: event-schemas
+    app.kubernetes.io/part-of: product-platform
+data:
+  # Kubernetes Service of Schema Registry (container port 8081 inside the cluster)
+  SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Version in the name: a Job's template can't be changed, so each release is a new Job.
+  name: event-schemas-registration-1-0-0
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: event-schemas
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/part-of: product-platform
+spec:
+  backoffLimit: 3                    # retry a failed registration up to 3 times
+  activeDeadlineSeconds: 600         # give up after 10 minutes
+  ttlSecondsAfterFinished: 86400     # delete the finished Job (and its Pod) after 1 day
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: event-schemas
+        app.kubernetes.io/part-of: product-platform
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-schema-registry
+          image: busybox:1.36
+          command: ["sh", "-c", "until wget -qO- $(SCHEMA_REGISTRY_URL)/subjects >/dev/null 2>&1; do echo 'waiting for schema registry'; sleep 3; done"]
+          envFrom:
+            - configMapRef:
+                name: event-schemas-config
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 32Mi
+      containers:
+        - name: register-schemas
+          image: event-schemas-registration:1.0.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: event-schemas-config
+          # $(VAR) is expanded by Kubernetes from the container's environment
+          args: ["-Dschema.registry.url=$(SCHEMA_REGISTRY_URL)"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 768Mi

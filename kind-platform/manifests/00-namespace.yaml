@@ -1,0 +1,7 @@
+# All platform resources live in this namespace (like the "platform-net" network of compose).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: product-platform
+  labels:
+    app.kubernetes.io/part-of: product-platform

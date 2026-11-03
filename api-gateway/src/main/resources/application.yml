@@ -1,0 +1,455 @@
+spring:
+  application:
+    name: api-gateway
+
+  # ---------------- Redis: shared token buckets for rate limiting ----------------
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Short timeouts: if Redis is slow or down, the rate limiter must not slow every request.
+      # (The gateway's rate limiter FAILS OPEN: without Redis, requests are allowed.)
+      timeout: 500ms
+      connect-timeout: 1s
+
+  cloud:
+    gateway:
+      server:
+        webflux:
+          # ===================================================================
+          # TIMEOUTS - three layers, from inside to outside:
+          #   1. circuit breaker time limiter  per route   app.resilience.* (below)  <- the real timeout
+          #   2. httpclient response-timeout   global      safety net, longer than every route timeout
+          #   3. client timeouts               (mcp-server read-timeout 20s ...) must be LONGER than 1.
+          # ===================================================================
+          httpclient:
+            connect-timeout: 2000      # ms: a backend that can't even accept a connection fails fast
+            response-timeout: 130s     # > the longest route timeout (chatbot 120s)
+
+          # ===================================================================
+          # ROUTES. Every API route uses the same filter chain, IN THIS ORDER:
+          #   1. RequestRateLimiter  too many requests from this client?  -> 429  (cheapest check first)
+          #   2. Bulkhead            too many requests in flight here?     -> 503  (protects capacity)
+          #   3. CircuitBreaker      backend failing / slow / timed out?   -> fallback
+          #   4. Retry (GET only)    retry short glitches, INSIDE the breaker:
+          #                          an open circuit is never hammered with retries
+          # Values per route:  rate (requests/s), burst, max concurrent calls, breaker name.
+          # ===================================================================
+          routes:
+            # ---------------- Product WRITE side (POST/PUT/PATCH/DELETE) - checked BEFORE the read route ----------------
+            - id: product-write-service
+              order: -1
+              uri: lb://product-write-service
+              predicates:
+                - Path=/api/v1/products/**
+                - Method=POST,PUT,PATCH,DELETE
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 5
+                    redis-rate-limiter.burstCapacity: 10
+                    redis-rate-limiter.requestedTokens: 1
+                    key-resolver: "#{@clientKeyResolver}"
+                - Bulkhead=product-write-service, 20
+                - name: CircuitBreaker
+                  args:
+                    name: product-write
+                    fallbackUri: forward:/fallback/product-write
+                    statusCodes: [500, 502, 503, 504]
+
+            # ---------------- Product READ side (GET, Elasticsearch) - fallback: get-by-id from the write side ----------------
+            - id: product-service
+              uri: lb://product-service
+              predicates:
+                - Path=/api/v1/products/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 50
+                    redis-rate-limiter.burstCapacity: 100
+                    redis-rate-limiter.requestedTokens: 1
+                    key-resolver: "#{@clientKeyResolver}"
+                - Bulkhead=product-service, 100
+                - name: CircuitBreaker
+                  args:
+                    name: product-read
+                    fallbackUri: forward:/fallback/product-read
+                    statusCodes: [500, 502, 503, 504]
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    series: SERVER_ERROR
+                    backoff:
+                      firstBackoff: 100ms
+                      maxBackoff: 500ms
+                      factor: 2
+                      basedOnPreviousValue: false
+
+            # ---------------- Stock: internal reservation API is BLOCKED ----------------
+            - id: stock-reservations-blocked
+              order: -1
+              uri: no://op
+              predicates:
+                - Path=/api/v1/stock/reservations/**
+              filters:
+                - SetStatus=403
+
+            # ---------------- Stock ----------------
+            - id: stock-service
+              uri: lb://stock-service
+              predicates:
+                - Path=/api/v1/stock/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 30
+                    redis-rate-limiter.burstCapacity: 60
+                    redis-rate-limiter.requestedTokens: 1
+                    key-resolver: "#{@clientKeyResolver}"
+                - Bulkhead=stock-service, 50
+                - name: CircuitBreaker
+                  args:
+                    name: stock
+                    fallbackUri: forward:/fallback/stock
+                    statusCodes: [500, 502, 503, 504]
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    series: SERVER_ERROR
+                    backoff:
+                      firstBackoff: 100ms
+                      maxBackoff: 500ms
+                      factor: 2
+                      basedOnPreviousValue: false
+
+            # ---------------- Orders (POST is never retried: it could create two orders) ----------------
+            - id: order-service
+              uri: lb://order-service
+              predicates:
+                - Path=/api/v1/orders/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 10
+                    redis-rate-limiter.burstCapacity: 20
+                    redis-rate-limiter.requestedTokens: 1
+                    key-resolver: "#{@clientKeyResolver}"
+                - Bulkhead=order-service, 30
+                - name: CircuitBreaker
+                  args:
+                    name: orders
+                    fallbackUri: forward:/fallback/orders
+                    statusCodes: [500, 502, 503, 504]
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    series: SERVER_ERROR
+                    backoff:
+                      firstBackoff: 100ms
+                      maxBackoff: 500ms
+                      factor: 2
+                      basedOnPreviousValue: false
+
+            # ---------------- Users ----------------
+            - id: user-service
+              uri: lb://user-service
+              predicates:
+                - Path=/api/v1/users/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 20
+                    redis-rate-limiter.burstCapacity: 40
+                    redis-rate-limiter.requestedTokens: 1
+                    key-resolver: "#{@clientKeyResolver}"
+                - Bulkhead=user-service, 30
+                - name: CircuitBreaker
+                  args:
+                    name: users
+                    fallbackUri: forward:/fallback/users
+                    statusCodes: [500, 502, 503, 504]
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    series: SERVER_ERROR
+                    backoff:
+                      firstBackoff: 100ms
+                      maxBackoff: 500ms
+                      factor: 2
+                      basedOnPreviousValue: false
+
+            # ---------------- RAG: documents + search (embedding/LLM work is expensive) ----------------
+            - id: rag-service
+              uri: lb://rag-service
+              predicates:
+                - Path=/api/v1/rag/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 5
+                    redis-rate-limiter.burstCapacity: 10
+                    redis-rate-limiter.requestedTokens: 1
+                    key-resolver: "#{@clientKeyResolver}"
+                - Bulkhead=rag-service, 10
+                - name: CircuitBreaker
+                  args:
+                    name: rag
+                    fallbackUri: forward:/fallback/rag
+                    statusCodes: [500, 502, 503, 504]
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    series: SERVER_ERROR
+                    backoff:
+                      firstBackoff: 100ms
+                      maxBackoff: 500ms
+                      factor: 2
+                      basedOnPreviousValue: false
+
+            # ---------------- Chatbot API (LLM on CPU: few concurrent answers, long timeout) ----------------
+            - id: mcp-client-api
+              uri: lb://mcp-client
+              predicates:
+                - Path=/api/v1/chat/**
+              filters:
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 1
+                    redis-rate-limiter.burstCapacity: 5
+                    redis-rate-limiter.requestedTokens: 1
+                    key-resolver: "#{@clientKeyResolver}"
+                - Bulkhead=mcp-client-api, 5
+                - name: CircuitBreaker
+                  args:
+                    name: chatbot
+                    fallbackUri: forward:/fallback/chatbot
+                    statusCodes: [500, 502, 503, 504]
+
+            # ---------------- Chatbot web UI (static files: no resilience filters needed) ----------------
+            - id: mcp-client-ui
+              uri: lb://mcp-client
+              predicates:
+                - Path=/chat, /chat/**
+
+            # ---------------- Root -> chat UI ----------------
+            - id: root-redirect
+              uri: no://op
+              predicates:
+                - Path=/
+              filters:
+                - RedirectTo=302, /chat/
+
+            # ---------------- OpenAPI descriptions for the Swagger UI ----------------
+            # /openapi/<service>  ->  <service>/v3/api-docs. Read-only JSON documents: no resilience
+            # filters needed. (The API calls made with "Try it out" use the normal routes above.)
+            - id: openapi-product-service
+              uri: lb://product-service
+              predicates:
+                - Path=/openapi/product-service
+                - Method=GET
+              filters:
+                - SetPath=/v3/api-docs
+            - id: openapi-product-write-service
+              uri: lb://product-write-service
+              predicates:
+                - Path=/openapi/product-write-service
+                - Method=GET
+              filters:
+                - SetPath=/v3/api-docs
+            - id: openapi-stock-service
+              uri: lb://stock-service
+              predicates:
+                - Path=/openapi/stock-service
+                - Method=GET
+              filters:
+                - SetPath=/v3/api-docs
+            - id: openapi-order-service
+              uri: lb://order-service
+              predicates:
+                - Path=/openapi/order-service
+                - Method=GET
+              filters:
+                - SetPath=/v3/api-docs
+            - id: openapi-user-service
+              uri: lb://user-service
+              predicates:
+                - Path=/openapi/user-service
+                - Method=GET
+              filters:
+                - SetPath=/v3/api-docs
+            - id: openapi-rag-service
+              uri: lb://rag-service
+              predicates:
+                - Path=/openapi/rag-service
+                - Method=GET
+              filters:
+                - SetPath=/v3/api-docs
+            - id: openapi-mcp-client
+              uri: lb://mcp-client
+              predicates:
+                - Path=/openapi/mcp-client
+                - Method=GET
+              filters:
+                - SetPath=/v3/api-docs
+
+            # NOT routed on purpose:
+            #   mcp-server (8090) - only the MCP client talks to it (localhost)
+            #   eureka-server     - infrastructure, not an API
+            #   /fallback/**      - internal target of the circuit breakers (404 when called directly)
+            #   mcp-server        - has no REST API (only the MCP protocol on /mcp), so no OpenAPI document
+
+          # Browser access for a future frontend (e.g. React dev server on port 3000)
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowed-origins: "http://localhost:3000"
+                allowed-methods: GET,POST,PUT,DELETE,OPTIONS
+                allowed-headers: "*"
+                exposed-headers: X-Correlation-Id,Location,Retry-After,X-RateLimit-Remaining,X-Fallback-Source
+                max-age: 3600
+
+# =======================================================================
+# CIRCUIT BREAKERS + TIMEOUTS (read by resilience/ResilienceConfig)
+# =======================================================================
+app:
+  resilience:
+    circuit-breaker-defaults:
+      sliding-window-size: 20               # evaluate the last 20 calls
+      minimum-number-of-calls: 10           # ...but decide only after at least 10
+      failure-rate-threshold: 50            # >= 50 % failures -> OPEN
+      slow-call-rate-threshold: 80          # >= 80 % slow calls -> OPEN
+      slow-call-duration-threshold: 3s      # slower than 3 s = "slow"
+      wait-duration-in-open-state: 15s      # stay OPEN 15 s, then HALF_OPEN (test calls)
+      permitted-calls-in-half-open-state: 5 # 5 test calls decide: CLOSED again or OPEN again
+      timeout: 5s                           # max time per request, retries included
+    circuit-breakers:
+      product-read:
+        timeout: 5s
+      product-write:
+        timeout: 10s
+        slow-call-duration-threshold: 5s
+      stock:
+        timeout: 5s
+      orders:
+        timeout: 10s
+        slow-call-duration-threshold: 5s
+      users:
+        timeout: 5s
+      rag:
+        # embedding + reranking (+ an LLM answer for /query) on CPU
+        timeout: 90s
+        slow-call-duration-threshold: 45s
+      chatbot:
+        # an LLM answer with several tool calls can take a minute on CPU
+        timeout: 120s
+        slow-call-duration-threshold: 60s
+        minimum-number-of-calls: 5
+
+server:
+  port: 8080
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8762/eureka/}
+  instance:
+    instance-id: ${spring.application.name}:${server.port}
+    hostname: localhost
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # resilience = /actuator/resilience (circuit breakers + bulkheads)
+        include: health,info,gateway,resilience
+  endpoint:
+    health:
+      show-details: always
+    gateway:
+      access: read-only
+  health:
+    # Redis is OPTIONAL for the gateway (rate limiting fails open). A Redis outage must
+    # not mark the gateway DOWN - an orchestrator would restart a perfectly working gateway.
+    redis:
+      enabled: false
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: Single entry point with rate limiting, bulkheads, circuit breakers and fallbacks
+
+logging:
+  # ================= Centralized logging (same block in every service) =================
+  # Console: human-readable (pattern below). File: one JSON object per line (ECS format)
+  # in a folder SHARED by all services -> a log shipper (e.g. Grafana Alloy) can later send
+  # every service's logs to Grafana Loki without any code change.
+  file:
+    # product-platform/logs/<service-name>.log  (override the folder with env var LOG_DIR)
+    name: ${LOG_DIR:../logs}/${spring.application.name}.log
+  structured:
+    format:
+      # JSON for the file only. In containers, also set LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs
+      # (JSON on stdout is what container log collectors read).
+      file: ecs
+    ecs:
+      service:
+        # These four fields are added to EVERY log line: filter by service/environment in Loki
+        name: ${spring.application.name}
+        version: "@project.version@"
+        environment: ${APP_ENVIRONMENT:local}
+        node-name: ${HOSTNAME:${COMPUTERNAME:unknown}}
+  logback:
+    rollingpolicy:
+      # New file every day or at 50 MB; old files are gzipped and deleted after 7 days.
+      # total-size-cap: the log folder of ONE service can never grow beyond 1 GB.
+      max-file-size: 50MB
+      max-history: 7
+      total-size-cap: 1GB
+  pattern:
+    # Console: level + correlation id of the request/event (empty when there is none)
+    level: "%5p [%X{correlationId:-}]"
+  level:
+    com.example.gateway: INFO
+    org.springframework.cloud.gateway: INFO
+    # DEBUG shows every retry attempt (useful when testing the Retry pattern)
+    org.springframework.cloud.gateway.filter.factory.RetryGatewayFilterFactory: INFO
+
+# ================= Swagger UI for ALL services =================
+# http://localhost:8080/swagger-ui.html  -> pick a service in the "Select a definition" dropdown.
+# Each entry loads that service's OpenAPI document through the openapi-* routes above.
+springdoc:
+  # The gateway's OWN document only needs the Swagger UI configuration endpoint;
+  # the internal /fallback endpoints are not part of any public API.
+  paths-to-exclude: /fallback/**
+  swagger-ui:
+    path: /swagger-ui.html
+    urls:
+      - name: "Products - search (read)"
+        url: /openapi/product-service
+      - name: "Products - manage (write)"
+        url: /openapi/product-write-service
+      - name: "Stock"
+        url: /openapi/stock-service
+      - name: "Orders"
+        url: /openapi/order-service
+      - name: "Users"
+        url: /openapi/user-service
+      - name: "Documents (RAG)"
+        url: /openapi/rag-service
+      - name: "Chatbot"
+        url: /openapi/mcp-client
+    urls-primary-name: "Products - search (read)"
+    # Nicer to work with: operations sorted, models collapsed, "Try it out" ready, request duration shown
+    operations-sorter: alpha
+    tags-sorter: alpha
+    default-models-expand-depth: 0
+    try-it-out-enabled: true
+    display-request-duration: true

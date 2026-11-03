@@ -1,0 +1,175 @@
+spring:
+  application:
+    name: stock-service
+
+  # ---------------- Database ----------------
+  datasource:
+    # MySQL from docker compose. Port 3307 = MYSQL_PORT in infrastructure/.env
+    url: ${STOCK_DB_URL:jdbc:mysql://localhost:3307/stock_db?connectionTimeZone=UTC}
+    # Defaults match infrastructure/.env for local development.
+    # In any shared environment, pass real values as environment variables.
+    username: ${STOCK_DB_USERNAME:stock_user}
+    password: ${STOCK_DB_PASSWORD:stock_dev_password}
+    hikari:
+      pool-name: stock-db-pool
+      maximum-pool-size: 10
+      minimum-idle: 2
+      # Fail fast (5 s) instead of hanging when the pool or database is exhausted
+      connection-timeout: 5000
+      # Recycle connections before MySQL's wait_timeout closes them
+      max-lifetime: 1800000
+      # Logs a warning with a stack trace if a connection is held > 20 s (leak hint)
+      leak-detection-threshold: 20000
+
+  jpa:
+    # Don't keep DB connections open while JSON is written (Boot's default is true)
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema. Hibernate only CHECKS that entities match the tables.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+  # ---------------- Kafka (Spring Boot auto-configuration) ----------------
+  # Every Kafka setting lives here; override per environment with env vars or
+  # application-prod.yml. Java code contains no Kafka values.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # Shared by producer AND consumer (Confluent Schema Registry + Avro)
+    properties:
+      schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:18081}
+      # Schemas are registered from the event-schemas project, never by a running app
+      auto.register.schemas: false
+      # Generated classes carry "avro.java.string" markers the registered schemas don't have
+      avro.remove.java.properties: true
+      # One topic carries several event types -> subject <topic>-<record full name>
+      value.subject.name.strategy: io.confluent.kafka.serializers.subject.TopicRecordNameStrategy
+      # Decode into the generated classes (OrderCreated ...), not GenericRecord
+      specific.avro.reader: true
+
+    consumer:
+      group-id: stock-service
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      isolation-level: read-committed
+      max-poll-records: 100
+      # Raw bytes, decoded by AvroEventDecoder -> failed records reach the DLT unchanged
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+
+    # Used by the outbox relay (and for DLT records). Values are already Avro bytes.
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      acks: all
+      compression-type: zstd
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        linger.ms: 5
+        delivery.timeout.ms: 120000
+
+    listener:
+      ack-mode: record
+      concurrency: 3
+
+server:
+  port: 8082
+  forward-headers-strategy: framework
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8762/eureka/}
+  instance:
+    instance-id: ${spring.application.name}:${server.port}
+    hostname: localhost
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: Stock / inventory service backed by MySQL
+
+app:
+  kafka:
+    error-handling:
+      initial-interval: 1s
+      multiplier: 2.0
+      max-interval: 30s
+      # e.g. order.events.v1.stock-service.dlt
+      dlt-suffix: .${spring.kafka.consumer.group-id}.dlt
+  outbox:
+    poll-interval: 500ms
+    batch-size: 100
+    send-timeout: 10s
+    retention: 7d
+    cleanup-cron: "0 0 * * * *"
+  sample-data:
+    # Loads stock for the 30 sample products, ONLY when the stock_item table is empty.
+    # Set to false in any shared or production environment.
+    enabled: true
+
+logging:
+  # ================= Centralized logging (same block in every service) =================
+  # Console: human-readable (pattern below). File: one JSON object per line (ECS format)
+  # in a folder SHARED by all services -> a log shipper (e.g. Grafana Alloy) can later send
+  # every service's logs to Grafana Loki without any code change.
+  file:
+    # product-platform/logs/<service-name>.log  (override the folder with env var LOG_DIR)
+    name: ${LOG_DIR:../logs}/${spring.application.name}.log
+  structured:
+    format:
+      # JSON for the file only. In containers, also set LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs
+      # (JSON on stdout is what container log collectors read).
+      file: ecs
+    ecs:
+      service:
+        # These four fields are added to EVERY log line: filter by service/environment in Loki
+        name: ${spring.application.name}
+        version: "@project.version@"
+        environment: ${APP_ENVIRONMENT:local}
+        node-name: ${HOSTNAME:${COMPUTERNAME:unknown}}
+  logback:
+    rollingpolicy:
+      # New file every day or at 50 MB; old files are gzipped and deleted after 7 days.
+      # total-size-cap: the log folder of ONE service can never grow beyond 1 GB.
+      max-file-size: 50MB
+      max-history: 7
+      total-size-cap: 1GB
+  pattern:
+    level: "%5p [%X{correlationId:-}]"
+  level:
+    com.example.stock: INFO
+    # Uncomment to see the SQL Hibernate runs:
+    # org.hibernate.SQL: DEBUG
+
+# ================= OpenAPI / Swagger =================
+# This service only GENERATES its API description at /v3/api-docs.
+# The Swagger UI for ALL services is on the gateway: http://localhost:8080/swagger-ui.html
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  # Only the business API (no /actuator, no /error)
+  paths-to-match: /api/v1/**
+  # Internal reservation API: blocked by the gateway (403), so it is not documented there
+  paths-to-exclude: /api/v1/stock/reservations/**
+  show-actuator: false
+  default-produces-media-type: application/json

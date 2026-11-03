@@ -1,0 +1,17 @@
+{
+  "type": "record",
+  "name": "ProductSnapshot",
+  "namespace": "com.example.events.product",
+  "doc": "Owner: product-service. Topic: product.catalog.v1 (COMPACTED), key = sku. The full current state of one product. A record with a null value (tombstone) means the product was deleted. Consumers keep a local copy, so they never need to call product-service synchronously.",
+  "fields": [
+    { "name": "eventId", "type": "string" },
+    { "name": "occurredAt", "type": { "type": "long", "logicalType": "timestamp-millis" } },
+    { "name": "productId", "type": "string" },
+    { "name": "sku", "type": "string" },
+    { "name": "name", "type": "string" },
+    { "name": "brand", "type": "string" },
+    { "name": "category", "type": "string" },
+    { "name": "price", "type": { "type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 2 } },
+    { "name": "currency", "type": "string", "default": "USD" }
+  ]
+}

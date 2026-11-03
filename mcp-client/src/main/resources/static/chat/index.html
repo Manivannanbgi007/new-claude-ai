@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Product assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <!-- IBM Plex Sans; falls back to system fonts when offline -->
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/chat.css">
+</head>
+<body>
+<div class="app">
+
+    <header class="app-header">
+        <div>
+            <h1>Product assistant</h1>
+            <p class="app-subtitle">Products, stock, orders and your uploaded documents.</p>
+        </div>
+        <div class="header-actions">
+            <!-- Read answers aloud (text-to-speech). Hidden if the browser can't speak. -->
+            <button type="button" id="speak-toggle" class="button-secondary" aria-pressed="false" hidden>
+                Read aloud: off
+            </button>
+            <button type="button" id="documents-toggle" class="button-secondary" aria-expanded="false"
+                    aria-controls="documents-panel">Documents</button>
+            <button type="button" id="new-chat" class="button-secondary">New chat</button>
+        </div>
+    </header>
+
+    <!-- Knowledge base: upload documents the assistant can answer from (rag-service) -->
+    <section id="documents-panel" class="documents-panel" hidden aria-label="Knowledge base documents">
+        <form id="upload-form" class="upload-form">
+            <label class="upload-field">
+                <span>File (PDF, DOCX, PPTX, TXT, MD, HTML - max 20 MB)</span>
+                <input type="file" id="upload-file" accept=".pdf,.docx,.pptx,.txt,.md,.html" required>
+            </label>
+            <label class="upload-field upload-category">
+                <span>Category</span>
+                <input type="text" id="upload-category" placeholder="e.g. warranty" maxlength="50"
+                       pattern="[a-z0-9-]*" title="lower-case letters, digits and -">
+            </label>
+            <button type="submit" id="upload-button" class="button-primary">Upload</button>
+        </form>
+        <p id="upload-status" class="upload-status" aria-live="polite" hidden></p>
+        <ul id="document-list" class="document-list"></ul>
+    </section>
+
+    <!-- Messages appear here. aria-live makes screen readers announce new answers. -->
+    <main id="messages" class="messages" aria-live="polite">
+
+        <section id="empty-state" class="empty-state">
+            <h2>What are you looking for?</h2>
+            <p>Ask about products, stock and orders - or about the shop's policies and manuals. Try one of these:</p>
+            <div class="suggestions">
+                <button type="button" class="suggestion">Find laptops under $1,000.</button>
+                <button type="button" class="suggestion">Show me products from Apple.</button>
+                <button type="button" class="suggestion">Find products with 16 GB RAM.</button>
+                <button type="button" class="suggestion">Show the cheapest products in the laptop category.</button>
+                <button type="button" class="suggestion">Find products containing the word 'gaming'. Show 3 per page.</button>
+                <button type="button" class="suggestion">Is the MacBook Air 13 available?</button>
+                <button type="button" class="suggestion">What is the return policy for opened headphones?</button>
+                <button type="button" class="suggestion">What does error E-4012 mean?</button>
+            </div>
+        </section>
+
+    </main>
+
+    <form id="composer" class="composer" autocomplete="off">
+        <label for="message-input" class="visually-hidden">Your message</label>
+        <textarea id="message-input" rows="1" maxlength="2000"
+                  placeholder="Ask about a product"></textarea>
+        <!-- Speak instead of typing (speech-to-text). Hidden if the browser can't listen. -->
+        <button type="button" id="mic-button" class="button-mic" aria-pressed="false"
+                aria-label="Speak your message" title="Speak your message" hidden>
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+                <path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/>
+            </svg>
+        </button>
+        <button type="submit" id="send-button" class="button-primary">Send</button>
+        <p class="composer-hint">
+            <span id="composer-hint-text">Enter to send, Shift+Enter for a new line.</span>
+            <span id="char-count" class="char-count" hidden></span>
+        </p>
+        <!-- Voice status: "Listening...", errors, "check the text and press Send" -->
+        <p id="voice-status" class="voice-status" aria-live="polite" hidden></p>
+    </form>
+
+</div>
+<script src="js/chat.js"></script>
+<!-- Voice is an add-on: the chat works fully without it -->
+<script src="js/voice.js"></script>
+<script src="js/documents.js"></script>
+</body>
+</html>

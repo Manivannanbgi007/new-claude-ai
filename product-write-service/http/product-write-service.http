@@ -1,0 +1,136 @@
+### Product Write Service + CDC pipeline - example requests (IntelliJ HTTP Client)
+### Start: docker compose (mysql-product, Kafka, kafka-connect, debezium-init, Elasticsearch)
+###        -> eureka-server -> product-write-service -> product-service
+### @write = source of truth (MySQL).  @read = projection (Elasticsearch).
+### Between a write and the read check, wait about 1 second: the projection is
+### ASYNCHRONOUS (eventual consistency). If a read still shows old data, run it again.
+
+@write = http://localhost:8089/api/v1/products
+@read = http://localhost:8081/api/v1/products
+@connect = http://localhost:8083
+
+### ===================== PIPELINE HEALTH =====================
+
+### 1. Debezium connector status - expect connector AND task "state": "RUNNING"
+GET {{connect}}/connectors/product-db-cdc/status
+
+### 2. Write side health - expect "db" UP
+GET http://localhost:8089/actuator/health
+
+### 3. Read side: sample data arrived through CDC - expect "totalElements": 30
+GET {{read}}?size=1
+
+### ===================== CREATE =====================
+
+### 4. Create in MySQL - expect 201, "version": 0, and a UUID id
+POST {{write}}
+Content-Type: application/json
+X-Correlation-Id: cdc-demo-create-001
+
+{
+  "sku": "LAP-FRM-001",
+  "name": "Framework Laptop 13",
+  "description": "Modular, repairable 13.5-inch laptop with upgradeable memory and storage.",
+  "brand": "Framework",
+  "category": "laptop",
+  "price": 1049.00,
+  "ramGb": 16,
+  "rating": 4.4,
+  "tags": ["modular", "repairable", "windows"]
+}
+
+> {%
+    client.global.set("productId", response.body.id);
+%}
+
+### 5. Source of truth - the row in MySQL
+GET {{write}}/{{productId}}
+
+### 6. Projection - SAME id, "version": 0, tags as an array (wait ~1 s after request 4)
+GET {{read}}/{{productId}}
+
+### 7. Searchable - expect the Framework laptop in the results
+GET {{read}}?q=repairable
+
+### ===================== UPDATE (optimistic locking) =====================
+
+### 8. Update with the CURRENT version 0 - expect 200 and "version": 1
+PUT {{write}}/{{productId}}
+Content-Type: application/json
+
+{
+  "version": 0,
+  "name": "Framework Laptop 13 (2026 Edition)",
+  "description": "Modular, repairable 13.5-inch laptop with upgradeable memory and storage.",
+  "brand": "Framework",
+  "category": "laptop",
+  "price": 999.00,
+  "ramGb": 32,
+  "rating": 4.5,
+  "tags": ["modular", "repairable", "windows"]
+}
+
+### 9. Projection updated - expect price 999.00, ramGb 32, "version": 1
+GET {{read}}/{{productId}}
+
+### 10. Update with an OLD version (0) - expect 409 "Stale version"; MySQL and ES unchanged
+PUT {{write}}/{{productId}}
+Content-Type: application/json
+
+{
+  "version": 0,
+  "name": "Lost update attempt",
+  "brand": "Framework",
+  "category": "laptop",
+  "price": 1.00
+}
+
+### ===================== VALIDATION & CONFLICTS =====================
+
+### 11. Duplicate SKU (case-insensitive) - expect 409 "Duplicate SKU"
+POST {{write}}
+Content-Type: application/json
+
+{
+  "sku": "lap-frm-001",
+  "name": "Duplicate",
+  "brand": "Framework",
+  "category": "laptop",
+  "price": 10.00
+}
+
+### 12. Invalid body - expect 400 with errors for sku, name, price, rating and tags
+POST {{write}}
+Content-Type: application/json
+
+{
+  "sku": "bad sku!",
+  "name": "",
+  "brand": "Test",
+  "category": "laptop",
+  "price": -5,
+  "rating": 7,
+  "tags": ["Has Spaces"]
+}
+
+### 13. Update without version - expect 400 "version is required"
+PUT {{write}}/{{productId}}
+Content-Type: application/json
+
+{
+  "name": "No version",
+  "brand": "Framework",
+  "category": "laptop",
+  "price": 10.00
+}
+
+### ===================== DELETE =====================
+
+### 14. Delete in MySQL - expect 204
+DELETE {{write}}/{{productId}}
+
+### 15. Projection removed - expect 404 from the READ side (wait ~1 s)
+GET {{read}}/{{productId}}
+
+### 16. Delete again - expect 404 from the write side
+DELETE {{write}}/{{productId}}

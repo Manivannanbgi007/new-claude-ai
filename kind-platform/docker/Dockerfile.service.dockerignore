@@ -1,0 +1,16 @@
+# Build context = the whole product-platform folder.
+# Keep it small and clean: Maven only needs each project's pom.xml and src/.
+# (BuildKit uses this file automatically because it is named <Dockerfile>.dockerignore.)
+**/target/
+**/logs/
+**/.git/
+**/.idea/
+**/.vscode/
+**/*.iml
+**/node_modules/
+**/http/
+**/*.zip
+**/*.log
+infrastructure/
+kind-platform/
+k8s-user-service/

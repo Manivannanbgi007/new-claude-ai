@@ -1,0 +1,209 @@
+### Stock Service - example requests (IntelliJ HTTP Client)
+### Start: docker compose (MySQL) -> eureka-server -> stock-service
+### Direct calls on port 8082. Sample stock uses the same SKUs as product-service.
+### Run the REQUESTS IN ORDER within each section - later requests depend on earlier ones.
+
+@baseUrl = http://localhost:8082
+@stock = {{baseUrl}}/api/v1/stock
+@reservations = {{stock}}/reservations
+
+### 1. Health - expect "status":"UP" with "db" (MySQL) UP
+GET {{baseUrl}}/actuator/health
+
+### ===================== AVAILABILITY (product selected) =====================
+
+### 2. In stock - expect "available": true, "status": "IN_STOCK" (MacBook Air, 25 on hand)
+GET {{stock}}/LAP-APL-001/availability?quantity=2
+
+### 3. Out of stock - expect "available": false, "status": "OUT_OF_STOCK" (MacBook Pro)
+GET {{stock}}/LAP-APL-002/availability
+
+### 4. Low stock, asking for more than exists - expect "available": false, "availableQuantity": 2
+GET {{stock}}/LAP-HP-002/availability?quantity=5
+
+### 5. Lower-case SKU works too (SKUs are case-insensitive)
+GET {{stock}}/lap-apl-001/availability
+
+### 6. Unknown SKU - expect 404 "Stock item not found"
+GET {{stock}}/NOPE-000/availability
+
+### 7. Whole cart in one call - expect "allAvailable": false,
+#    because PHN-ONE-001 is out of stock and XYZ-999 is NOT_STOCKED.
+#    The two LAP-APL-001 lines are merged into one line with quantity 3.
+POST {{stock}}/availability
+Content-Type: application/json
+
+{
+  "items": [
+    { "sku": "LAP-APL-001", "quantity": 1 },
+    { "sku": "AUD-APL-001", "quantity": 2 },
+    { "sku": "PHN-ONE-001", "quantity": 1 },
+    { "sku": "XYZ-999", "quantity": 1 },
+    { "sku": "LAP-APL-001", "quantity": 2 }
+  ]
+}
+
+### ===================== RESERVATION FLOW (product ordered) =====================
+### In production only the order-service calls these (the gateway blocks them).
+
+### 8. Reserve for order ORD-1001 - expect 201 Created, "status": "RESERVED"
+POST {{reservations}}
+Content-Type: application/json
+
+{
+  "orderId": "ORD-1001",
+  "items": [
+    { "sku": "LAP-APL-001", "quantity": 2 },
+    { "sku": "AUD-APL-001", "quantity": 1 }
+  ]
+}
+
+### 9. Stock after reserving - expect quantityOnHand 25, quantityReserved 2, quantityAvailable 23
+GET {{stock}}/LAP-APL-001
+
+### 10. SAME request again (e.g. order-service retry after a timeout)
+#     Expect 200 OK (not 201) and the SAME reservation - nothing reserved twice.
+POST {{reservations}}
+Content-Type: application/json
+
+{
+  "orderId": "ORD-1001",
+  "items": [
+    { "sku": "LAP-APL-001", "quantity": 2 },
+    { "sku": "AUD-APL-001", "quantity": 1 }
+  ]
+}
+
+### 11. Get the reservation
+GET {{reservations}}/ORD-1001
+
+### 12. Confirm (order completed) - expect "status": "CONFIRMED"
+POST {{reservations}}/ORD-1001/confirm
+
+### 13. Stock after confirming - expect quantityOnHand 23, quantityReserved 0, quantityAvailable 23
+GET {{stock}}/LAP-APL-001
+
+### 14. Release a confirmed reservation - expect 409 "Operation not allowed"
+POST {{reservations}}/ORD-1001/release
+
+### ----- cancellation flow -----
+
+### 15. Reserve for order ORD-1002
+POST {{reservations}}
+Content-Type: application/json
+
+{
+  "orderId": "ORD-1002",
+  "items": [ { "sku": "TAB-APL-001", "quantity": 3 } ]
+}
+
+### 16. Release (order cancelled) - expect "status": "RELEASED"; TAB-APL-001 is fully available again
+POST {{reservations}}/ORD-1002/release
+
+### 17. Confirm a released reservation - expect 409
+POST {{reservations}}/ORD-1002/confirm
+
+### ----- not enough stock -----
+
+### 18. All-or-nothing - expect 409 "Insufficient stock" with a "shortages" list for LAP-HP-002.
+#     AUD-SNY-001 IS available, but is NOT reserved either, because the order can't be fulfilled.
+POST {{reservations}}
+Content-Type: application/json
+
+{
+  "orderId": "ORD-1003",
+  "items": [
+    { "sku": "AUD-SNY-001", "quantity": 1 },
+    { "sku": "LAP-HP-002", "quantity": 5 }
+  ]
+}
+
+### 19. Check that AUD-SNY-001 was NOT reserved - expect quantityReserved 0
+GET {{stock}}/AUD-SNY-001
+
+### 20. Unknown order - expect 404 "Reservation not found"
+GET {{reservations}}/ORD-9999
+
+### ===================== STOCK MANAGEMENT =====================
+
+### 21. List all stock, page 0 (sorted by SKU)
+GET {{stock}}?page=0&size=10
+
+### 22. What needs restocking? - expect 9 items (low stock + out of stock)
+GET {{stock}}?lowStockOnly=true
+
+### 23. Delivery received: +20 MacBook Pro - status changes from OUT_OF_STOCK to IN_STOCK
+POST {{stock}}/LAP-APL-002/adjustments
+Content-Type: application/json
+
+{
+  "quantityChange": 20,
+  "reason": "Delivery from supplier, delivery note DN-5521"
+}
+
+### 24. Write off more than exists - expect 409 (on-hand can't go below 0 or below reserved)
+POST {{stock}}/LAP-HP-002/adjustments
+Content-Type: application/json
+
+{
+  "quantityChange": -10,
+  "reason": "Damaged in warehouse"
+}
+
+### 25. Stock count correction (absolute values)
+PUT {{stock}}/MON-SAM-001
+Content-Type: application/json
+
+{
+  "quantityOnHand": 14,
+  "reorderLevel": 4
+}
+
+### 26. Create stock for a new product - expect 201 + Location header
+POST {{stock}}
+Content-Type: application/json
+
+{
+  "sku": "LAP-FRM-001",
+  "quantityOnHand": 10,
+  "reorderLevel": 2
+}
+
+### 27. Same SKU again - expect 409 "Duplicate stock item"
+POST {{stock}}
+Content-Type: application/json
+
+{
+  "sku": "lap-frm-001",
+  "quantityOnHand": 5,
+  "reorderLevel": 1
+}
+
+### 28. Delete it - expect 204
+DELETE {{stock}}/LAP-FRM-001
+
+### 29. Delete a SKU used by orders - expect 409 (LAP-APL-001 has reservation history)
+DELETE {{stock}}/LAP-APL-001
+
+### ===================== VALIDATION =====================
+
+### 30. Invalid body - expect 400 with "errors" for sku, quantityOnHand and reorderLevel
+POST {{stock}}
+Content-Type: application/json
+
+{
+  "sku": "bad sku!",
+  "quantityOnHand": -1
+}
+
+### 31. Invalid query parameter - expect 400, "errors": {"quantity": "quantity must be at least 1"}
+GET {{stock}}/LAP-APL-001/availability?quantity=0
+
+### 32. Invalid reservation - expect 400 for orderId and items
+POST {{reservations}}
+Content-Type: application/json
+
+{
+  "orderId": "",
+  "items": []
+}

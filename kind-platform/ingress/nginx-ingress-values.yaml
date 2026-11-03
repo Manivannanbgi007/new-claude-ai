@@ -1,0 +1,15 @@
+# Helm values for F5 NGINX Ingress Controller on Kind (GUIDE.md step 18).
+#   helm install nginx-ingress oci://ghcr.io/nginx/charts/nginx-ingress \
+#     --namespace nginx-ingress --create-namespace -f ingress/nginx-ingress-values.yaml
+controller:
+  replicaCount: 1
+  ingressClass:
+    name: nginx                 # matches "ingressClassName: nginx" in the Ingress
+    create: true
+  service:
+    # Kind has no cloud load balancer -> NodePort on the ports mapped in kind-cluster.yaml
+    type: NodePort
+    httpPort:
+      nodePort: 30100           # host port 80
+    httpsPort:
+      nodePort: 30443           # host port 443

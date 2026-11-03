@@ -1,0 +1,118 @@
+spring:
+  application:
+    name: mcp-server
+  ai:
+    mcp:
+      server:
+        # Name and version the MCP client sees during the handshake
+        name: product-mcp-server
+        version: 1.0.0
+        # SYNC = plain blocking methods (simplest; fits Spring MVC)
+        type: SYNC
+        # Streamable HTTP = the current MCP HTTP transport; endpoint is POST /mcp
+        protocol: STREAMABLE
+        # General guidance sent to the client during the handshake
+        instructions: >
+          Tools for an online electronics shop. Prices are in USD.
+          Browsing: searchProducts, getProductById, getSearchFacets.
+          Stock questions: checkProductStock (read-only).
+          Orders: getOrderDetails, listMyOrders (read-only).
+          Company documents (policies, warranty, shipping, manuals): searchDocuments,
+          listKnowledgeDocuments (read-only). Answer only from the returned passages.
+          Buying: purchaseProduct - ONLY when the user explicitly asks to buy or order.
+          It checks product and stock itself and creates no order if either is missing.
+        capabilities:
+          # We only offer tools - no resources, prompts or completions
+          tool: true
+          resource: false
+          prompt: false
+          completion: false
+
+server:
+  port: 8090
+  # Listen on this machine only. MCP servers can trigger actions, so never
+  # expose one to the network without authentication.
+  address: localhost
+
+# Where the backend APIs live. The API GATEWAY is the ONLY backend this server talks to
+# (products, stock and orders all go through it).
+app:
+  product-api:
+    base-url: ${PRODUCT_API_BASE_URL:http://localhost:8080}
+    connect-timeout: 3s
+    # Longer than the gateway's 15s response-timeout, so a slow backend
+    # surfaces as a clean 504 from the gateway instead of a client timeout.
+    read-timeout: 20s
+
+  # Purchase workflow (tool purchaseProduct)
+  purchase:
+    # The chatbot has no login yet: every chatbot order is placed for this FAKE demo
+    # customer. In the security phase it is replaced by the logged-in user's id.
+    customer-id: ${CHATBOT_CUSTOMER_ID:7c9e6679-7425-40de-944b-e07fc1f90ae7}
+    # Max units per product the chatbot may order in one purchase
+    max-quantity: 10
+    # Orders are confirmed asynchronously (Kafka saga): wait up to this long for the result
+    confirmation-wait: 5s
+    poll-interval: 300ms
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8762/eureka/}
+  instance:
+    instance-id: ${spring.application.name}:${server.port}
+    hostname: localhost
+    metadata-map:
+      mcp-endpoint: /mcp
+      mcp-transport: streamable-http
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ${spring.application.name}
+    description: MCP server exposing product search tools
+
+logging:
+  # ================= Centralized logging (same block in every service) =================
+  # Console: human-readable (pattern below). File: one JSON object per line (ECS format)
+  # in a folder SHARED by all services -> a log shipper (e.g. Grafana Alloy) can later send
+  # every service's logs to Grafana Loki without any code change.
+  file:
+    # product-platform/logs/<service-name>.log  (override the folder with env var LOG_DIR)
+    name: ${LOG_DIR:../logs}/${spring.application.name}.log
+  structured:
+    format:
+      # JSON for the file only. In containers, also set LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs
+      # (JSON on stdout is what container log collectors read).
+      file: ecs
+    ecs:
+      service:
+        # These four fields are added to EVERY log line: filter by service/environment in Loki
+        name: ${spring.application.name}
+        version: "@project.version@"
+        environment: ${APP_ENVIRONMENT:local}
+        node-name: ${HOSTNAME:${COMPUTERNAME:unknown}}
+  logback:
+    rollingpolicy:
+      # New file every day or at 50 MB; old files are gzipped and deleted after 7 days.
+      # total-size-cap: the log folder of ONE service can never grow beyond 1 GB.
+      max-file-size: 50MB
+      max-history: 7
+      total-size-cap: 1GB
+  pattern:
+    level: "%5p [%X{correlationId:-}]"
+  level:
+    com.example.mcpserver: INFO
+    # DEBUG shows MCP protocol messages (initialize, tools/list, tools/call)
+    io.modelcontextprotocol: INFO

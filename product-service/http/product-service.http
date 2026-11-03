@@ -1,0 +1,46 @@
+### Product Service (READ SIDE) - example requests (IntelliJ HTTP Client)
+### This service only READS. Writes: product-write-service (port 8089) or POST/PUT/DELETE via the gateway.
+### Data arrives from MySQL through Debezium. Counts assume the 30 sample products.
+
+@baseUrl = http://localhost:8081
+@api = {{baseUrl}}/api/v1/products
+
+### 1. Health - expect "status":"UP" (elasticsearch UP)
+GET {{baseUrl}}/actuator/health
+
+### 2. Default listing - newest first
+GET {{api}}
+
+> {%
+    client.global.set("firstProductId", response.body.content[0].id);
+%}
+
+### 3. Get by id - expect a UUID id and a "version" field
+GET {{api}}/{{firstProductId}}
+
+### 4. Laptops under $1,000, cheapest first - 7 products
+GET {{api}}?category=laptop&maxPrice=1000&sortBy=price
+
+### 5. Apple products - 8 products
+GET {{api}}?brand=apple
+
+### 6. Exactly 16 GB RAM - 9 products
+GET {{api}}?minRamGb=16&maxRamGb=16
+
+### 7. Text search with typo tolerance
+GET {{api}}?q=gamng
+
+### 8. Next page
+GET {{api}}?q=gaming&size=3&page=1
+
+### 9. Facets
+GET {{api}}/facets
+
+### 10. Writes are no longer served here - expect 405 Method Not Allowed
+POST {{api}}
+Content-Type: application/json
+
+{ "sku": "X-1" }
+
+### 11. Unknown id - expect 404
+GET {{api}}/does-not-exist

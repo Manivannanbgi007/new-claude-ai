@@ -1,0 +1,106 @@
+# =============================================================================
+# postgres-rag: PostgreSQL 17 + pgvector for rag-service (replaces compose "postgres-rag")
+# rag-service's Flyway migration creates the vector extension and tables.
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rag-db-credentials
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: postgres-rag
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: product-platform
+type: Opaque
+stringData:
+  database: rag_db
+  username: rag_user
+  password: rag_dev_password
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-rag
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: postgres-rag
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: product-platform
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres-rag
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-rag
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: postgres-rag
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: product-platform
+spec:
+  serviceName: postgres-rag
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-rag
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-rag
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: product-platform
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 999                       # the postgres group may write to the volume
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg17
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom: { secretKeyRef: { name: rag-db-credentials, key: database } }
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: rag-db-credentials, key: username } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: rag-db-credentials, key: password } }
+            # Data in a SUB-folder of the volume (PostgreSQL refuses a non-empty mount root)
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: TZ
+              value: UTC
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

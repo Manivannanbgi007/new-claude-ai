@@ -1,0 +1,16 @@
+# Keep the build context small and the image clean: only pom.xml and src/ are needed.
+target/
+logs/
+http/
+.git/
+.gitignore
+.idea/
+*.iml
+.vscode/
+.mvn/
+mvnw
+mvnw.cmd
+HELP.md
+*.log
+Dockerfile
+.dockerignore

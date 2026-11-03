@@ -1,0 +1,289 @@
+### User Service - example requests (IntelliJ HTTP Client)
+### Start: docker compose (mysql) -> eureka-server -> user-service
+### Direct calls on port 8092 (through the gateway: http://localhost:8080/api/v1/users).
+### Run the requests IN ORDER: the POSTs store the new ids for the later requests.
+
+@baseUrl = http://localhost:8092
+@users = {{baseUrl}}/api/v1/users
+
+### 0. Health - expect "status":"UP" with "db" UP
+GET {{baseUrl}}/actuator/health
+
+### ===================== CREATE 10 USERS =====================
+### Each expects 201 Created, "status": "ACTIVE", "version": 0 and a Location header.
+
+### 1. Aarav Sharma
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "aarav.sharma@example.com",
+  "firstName": "Aarav",
+  "lastName": "Sharma",
+  "phoneNumber": "+919876543210"
+}
+
+//> {% client.global.set("user1", response.body.id); %}
+
+### 2. Priya Nair
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "priya.nair@example.com",
+  "firstName": "Priya",
+  "lastName": "Nair",
+  "phoneNumber": "+919812345678"
+}
+
+//> {% client.global.set("user2", response.body.id); %}
+
+### 3. Rahul Verma - email in mixed case with spaces: stored as "rahul.verma@example.com"
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "Rahul.Verma@Example.COM",
+  "firstName": "Rahul",
+  "lastName": "Verma",
+  "phoneNumber": "+919900112233"
+}
+
+//> {% client.global.set("user3", response.body.id); %}
+
+### 4. Ananya Iyer - no phone number (optional)
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "ananya.iyer@example.com",
+  "firstName": "Ananya",
+  "lastName": "Iyer"
+}
+
+//> {% client.global.set("user4", response.body.id); %}
+
+### 5. Mohammed Faizal
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "mohammed.faizal@example.com",
+  "firstName": "Mohammed",
+  "lastName": "Faizal",
+  "phoneNumber": "+971501234567"
+}
+
+//> {% client.global.set("user5", response.body.id); %}
+
+### 6. Sneha Reddy
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "sneha.reddy@example.com",
+  "firstName": "Sneha",
+  "lastName": "Reddy",
+  "phoneNumber": "+919845012345"
+}
+
+//> {% client.global.set("user6", response.body.id); %}
+
+### 7. David Thompson (US number)
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "david.thompson@example.com",
+  "firstName": "David",
+  "lastName": "Thompson",
+  "phoneNumber": "+14155550123"
+}
+
+//> {% client.global.set("user7", response.body.id); %}
+
+### 8. Emma Müller - non-English letters are valid in names
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "emma.mueller@example.com",
+  "firstName": "Emma",
+  "lastName": "Müller",
+  "phoneNumber": "+4915112345678"
+}
+
+//> {% client.global.set("user8", response.body.id); %}
+
+### 9. Liam O'Connor - apostrophe in a name
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "liam.oconnor@example.com",
+  "firstName": "Liam",
+  "lastName": "O'Connor",
+  "phoneNumber": "+353861234567"
+}
+
+//> {% client.global.set("user9", response.body.id); %}
+
+### 10. Sofía Rodríguez-López - accent and hyphen, no phone
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "sofia.rodriguez@example.com",
+  "firstName": "Sofía",
+  "lastName": "Rodríguez-López"
+}
+
+//> {% client.global.set("user10", response.body.id); %}
+
+### ===================== READ & SEARCH =====================
+
+### 11. Get one user
+//GET {{users}}/{{user1}}
+
+### 12. List all - newest first, expect "totalElements": 10
+GET {{users}}
+
+### 13. Sort by last name A-Z, 5 per page
+GET {{users}}?sortBy=last_name&size=5
+
+### 14. Next page
+GET {{users}}?sortBy=last_name&size=5&page=1
+
+### 15. Text search in names and email - expect Aarav Sharma
+GET {{users}}?q=sharma
+
+### 16. Exact email (case-insensitive) - expect Rahul Verma
+GET {{users}}?email=RAHUL.VERMA@example.com
+
+### ===================== UPDATE (optimistic locking) =====================
+
+### 17. Update with the CURRENT version 0 - expect 200 and "version": 1
+//PUT {{users}}/{{user2}}
+Content-Type: application/json
+
+{
+  "version": 0,
+  "email": "priya.nair@example.com",
+  "firstName": "Priya",
+  "lastName": "Nair-Menon",
+  "phoneNumber": "+919812345679"
+}
+
+### 18. Update with an OLD version (0) - expect 409 "Stale version"
+//PUT {{users}}/{{user2}}
+Content-Type: application/json
+
+{
+  "version": 0,
+  "email": "priya.nair@example.com",
+  "firstName": "Lost",
+  "lastName": "Update"
+}
+
+### 19. Change email to one that another user has - expect 409 "Duplicate email"
+//PUT {{users}}/{{user3}}
+Content-Type: application/json
+
+{
+  "version": 0,
+  "email": "aarav.sharma@example.com",
+  "firstName": "Rahul",
+  "lastName": "Verma"
+}
+
+### ===================== STATUS LIFE CYCLE =====================
+
+### 20. Suspend - expect "status": "SUSPENDED", "version": 1
+//PUT {{users}}/{{user7}}/status
+Content-Type: application/json
+
+{
+  "status": "SUSPENDED",
+  "version": 0
+}
+
+### 21. Only suspended users - expect David Thompson
+GET {{users}}?status=suspended
+
+### 22. Re-activate - expect "status": "ACTIVE", "version": 2
+//PUT {{users}}/{{user7}}/status
+Content-Type: application/json
+
+{
+  "status": "ACTIVE",
+  "version": 1
+}
+
+### 23. Try to delete through the status endpoint - expect 409 (use DELETE instead)
+//PUT {{users}}/{{user7}}/status
+Content-Type: application/json
+
+{
+  "status": "DELETED",
+  "version": 2
+}
+
+### ===================== SOFT DELETE =====================
+
+### 24. Delete - expect 204
+//DELETE {{users}}/{{user10}}
+
+### 25. Deleted user is still readable - expect "status": "DELETED" and a "deletedAt" timestamp
+//GET {{users}}/{{user10}}
+
+### 26. Hidden from the normal list - expect "totalElements": 9
+GET {{users}}
+
+### 27. Only deleted users - expect Sofía Rodríguez-López
+GET {{users}}?status=deleted
+
+### 28. Update a deleted user - expect 409 "Operation not allowed"
+//PUT {{users}}/{{user10}}
+Content-Type: application/json
+
+{
+  "version": 1,
+  "email": "sofia.rodriguez@example.com",
+  "firstName": "Sofía",
+  "lastName": "Rodríguez"
+}
+
+### 29. Delete again - expect 204 (idempotent)
+//DELETE {{users}}/{{user10}}
+
+### ===================== VALIDATION & ERRORS =====================
+
+### 30. Duplicate email (different case) - expect 409 "Duplicate email"
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "Aarav.Sharma@EXAMPLE.com",
+  "firstName": "Another",
+  "lastName": "Aarav"
+}
+
+### 31. Invalid body - expect 400 with errors for email, firstName, lastName and phoneNumber
+POST {{users}}
+Content-Type: application/json
+
+{
+  "email": "not-an-email",
+  "firstName": "",
+  "lastName": "Smith123",
+  "phoneNumber": "98765"
+}
+
+### 32. Unknown id - expect 404 "User not found"
+GET {{users}}/00000000-0000-0000-0000-000000000000
+
+### 33. Invalid id format - expect 400
+GET {{users}}/not-a-uuid
+
+### 34. Invalid page size - expect 400, "errors": {"size": "size must be at most 100"}
+GET {{users}}?size=500

@@ -1,0 +1,76 @@
+# =============================================================================
+# Creates all Kafka topics - replaces compose service "kafka-init".
+# A Job runs ONCE to completion. The script is idempotent (--if-not-exists), so
+# running it again is harmless (e.g. after adding a new topic to the list).
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-topics-script
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: kafka-topics
+    app.kubernetes.io/part-of: product-platform
+data:
+  create-topics.sh: |
+    #!/bin/bash
+    set -e
+    BS=kafka:9092
+    echo "Waiting for Kafka at $BS ..."
+    until kafka-topics --bootstrap-server $BS --list >/dev/null 2>&1; do sleep 3; done
+
+    create() {
+      kafka-topics --bootstrap-server $BS --create --if-not-exists --topic "$1" \
+        --partitions 3 --replication-factor 1 --config "$2"
+    }
+    # ----- business event topics (7 days retention) -----
+    create order.events.v1   retention.ms=604800000
+    create stock.events.v1   retention.ms=604800000
+    create payment.events.v1 retention.ms=604800000
+    # ----- product catalogue: COMPACTED = keeps the latest value per SKU forever -----
+    create product.catalog.v1 cleanup.policy=compact
+    # ----- dead letter topics: <source topic>.<consumer group>.dlt (14 days) -----
+    create order.events.v1.stock-service.dlt    retention.ms=1209600000
+    create stock.events.v1.order-service.dlt    retention.ms=1209600000
+    create product.catalog.v1.order-service.dlt retention.ms=1209600000
+    # ----- product CDC (Debezium -> product-service), compacted -----
+    create cdc.product_db.product cleanup.policy=compact
+    create cdc.product_db.product.product-service.dlt retention.ms=1209600000
+
+    echo "Topics:"
+    kafka-topics --bootstrap-server $BS --list
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topics
+  namespace: product-platform
+  labels:
+    app.kubernetes.io/name: kafka-topics
+    app.kubernetes.io/part-of: product-platform
+spec:
+  backoffLimit: 5
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka-topics
+        app.kubernetes.io/part-of: product-platform
+    spec:
+      enableServiceLinks: false
+      restartPolicy: OnFailure
+      containers:
+        - name: create-topics
+          image: confluentinc/cp-kafka:8.0.0     # only for its "kafka-topics" CLI
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/scripts/create-topics.sh"]
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: kafka-topics-script

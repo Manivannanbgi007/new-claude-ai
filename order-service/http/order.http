@@ -1,0 +1,204 @@
+### Order Service - example requests (IntelliJ HTTP Client)
+### Start order: docker compose -> eureka-server -> product-write-service -> stock-service -> order-service
+### Direct calls on port 8084 (through the gateway: http://localhost:8080/api/v1/orders).
+###
+### IMPORTANT - orders are ASYNCHRONOUS:
+###   POST returns 202 with "status": "PENDING". stock-service answers via Kafka,
+###   usually within a second. Then GET shows CONFIRMED or REJECTED.
+###   If a GET still shows PENDING, wait a moment and run it again.
+###
+### All ids below are FAKE test data. SKUs are the platform's sample products.
+
+@baseUrl = http://localhost:8084
+@orders = {{baseUrl}}/api/v1/orders
+@stock = http://localhost:8082/api/v1/stock
+
+# Fake user ids (order-service does not check users yet - that comes with security)
+@aaravUserId = 7c9e6679-7425-40de-944b-e07fc1f90ae7
+@priyaUserId = 3b241101-e2bb-4255-8caf-4136c566a962
+@davidUserId = 9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d
+
+### 0. Health - expect "status":"UP" (db UP)
+GET {{baseUrl}}/actuator/health
+
+### ===================== PRODUCT CATALOGUE (local copy) =====================
+
+### 1. Catalogue replicated from product.catalog.v1 - expect "totalElements": 30
+#     If 0: run POST http://localhost:8089/api/v1/products/catalog/republish once.
+GET {{orders}}/catalog?size=5
+
+### 2. One product with the price order-service will use
+GET {{orders}}/catalog/LAP-APL-001
+
+### ===================== HAPPY PATH: order CONFIRMED =====================
+
+### 3. Aarav orders a MacBook Air and two AirPods Pro
+#     Expect 202 Accepted, "status": "PENDING", totalAmount 1597.00 (1099.00 + 2 x 249.00),
+#     names and prices taken from the catalogue (the client never sends prices).
+POST {{orders}}
+Content-Type: application/json
+Idempotency-Key: aarav-checkout-0001
+
+{
+  "userId": "{{aaravUserId}}",
+  "items": [
+    { "sku": "LAP-APL-001", "quantity": 1 },
+    { "sku": "AUD-APL-001", "quantity": 2 }
+  ]
+}
+
+> {%
+    client.global.set("order1", response.body.id);
+    client.test("Accepted as PENDING", () => {
+        client.assert(response.status === 202, "Expected 202, got " + response.status);
+        client.assert(response.body.status === "PENDING", "Expected PENDING");
+    });
+%}
+
+### 4. About 1 s later - expect "status": "CONFIRMED"
+GET {{orders}}/{{order1}}
+
+### 5. Order tracking - expect: (null -> PENDING "Order placed"), (PENDING -> CONFIRMED "Stock reserved")
+GET {{orders}}/{{order1}}/history
+
+### 6. Stock was deducted by the saga (quantityOnHand lower, quantityReserved back to 0)
+GET {{stock}}/LAP-APL-001
+
+### 7. Client retry with the SAME Idempotency-Key - expect 200 (not 202) and the SAME order id
+POST {{orders}}
+Content-Type: application/json
+Idempotency-Key: aarav-checkout-0001
+
+{
+  "userId": "{{aaravUserId}}",
+  "items": [
+    { "sku": "LAP-APL-001", "quantity": 1 },
+    { "sku": "AUD-APL-001", "quantity": 2 }
+  ]
+}
+
+### ===================== NOT ENOUGH STOCK: order REJECTED =====================
+
+### 8. Priya orders a MacBook Pro 14 - OUT OF STOCK in the sample data
+POST {{orders}}
+Content-Type: application/json
+
+{
+  "userId": "{{priyaUserId}}",
+  "items": [ { "sku": "LAP-APL-002", "quantity": 1 } ]
+}
+
+> {% client.global.set("order2", response.body.id); %}
+
+### 9. Expect "status": "REJECTED", failureReason "Insufficient stock: LAP-APL-002 (requested 1, available 0)"
+GET {{orders}}/{{order2}}
+
+### 10. All-or-nothing: 1 in-stock item + 1 low-stock item with too much quantity
+#      Expect REJECTED - and the Sony headphones are NOT reserved either.
+POST {{orders}}
+Content-Type: application/json
+
+{
+  "userId": "{{priyaUserId}}",
+  "items": [
+    { "sku": "AUD-SNY-001", "quantity": 1 },
+    { "sku": "LAP-HP-002", "quantity": 5 }
+  ]
+}
+
+> {% client.global.set("order3", response.body.id); %}
+
+### 11. Expect REJECTED with the LAP-HP-002 shortage in failureReason
+GET {{orders}}/{{order3}}
+
+### ===================== CANCELLATION (compensation) =====================
+
+### 12. David orders two Galaxy S25 phones and a monitor
+#      Duplicate lines for PHN-SAM-001 are MERGED into one line with quantity 2.
+POST {{orders}}
+Content-Type: application/json
+Idempotency-Key: david-checkout-0001
+
+{
+  "userId": "{{davidUserId}}",
+  "items": [
+    { "sku": "PHN-SAM-001", "quantity": 1 },
+    { "sku": "MON-LG-001", "quantity": 1 },
+    { "sku": "phn-sam-001", "quantity": 1 }
+  ]
+}
+
+> {% client.global.set("order4", response.body.id); %}
+
+### 13. Wait for CONFIRMED, then look at the stock
+GET {{orders}}/{{order4}}
+
+### 14. Cancel - expect "status": "CANCELLED", "cancellationReason": "CUSTOMER_REQUEST"
+#      stock-service receives OrderCancelled and puts the units back.
+POST {{orders}}/{{order4}}/cancel
+Content-Type: application/json
+
+{
+  "comment": "Ordered the wrong colour"
+}
+
+### 15. History - expect PENDING -> CONFIRMED -> CANCELLED (with the comment)
+GET {{orders}}/{{order4}}/history
+
+### 16. Stock is back (compare with before request 12)
+GET {{stock}}/PHN-SAM-001
+
+### 17. Cancel again - expect 200 and still CANCELLED (idempotent)
+POST {{orders}}/{{order4}}/cancel
+
+### 18. Cancel a REJECTED order - expect 409 "Operation not allowed"
+POST {{orders}}/{{order2}}/cancel
+
+### ===================== ORDERS OF A USER =====================
+
+### 19. All of Priya's orders, newest first - expect 2 (both REJECTED)
+GET {{orders}}?userId={{priyaUserId}}
+
+### 20. Only Aarav's CONFIRMED orders
+GET {{orders}}?userId={{aaravUserId}}&status=confirmed
+
+### 21. All orders, 10 per page (admin view)
+GET {{orders}}?page=0&size=10
+
+### 22. All rejected orders
+GET {{orders}}?status=rejected
+
+### ===================== VALIDATION & ERRORS =====================
+
+### 23. Unknown product - expect 400 "Unknown product" with "unknownSkus": ["LAP-XYZ-999"]
+POST {{orders}}
+Content-Type: application/json
+
+{
+  "userId": "{{aaravUserId}}",
+  "items": [ { "sku": "LAP-XYZ-999", "quantity": 1 } ]
+}
+
+### 24. Invalid body - expect 400 with errors for userId and items
+POST {{orders}}
+Content-Type: application/json
+
+{
+  "userId": "not-a-uuid",
+  "items": []
+}
+
+### 25. Invalid quantity - expect 400, "items[0].quantity": "quantity must be at least 1"
+POST {{orders}}
+Content-Type: application/json
+
+{
+  "userId": "{{davidUserId}}",
+  "items": [ { "sku": "TAB-APL-001", "quantity": 0 } ]
+}
+
+### 26. Unknown order - expect 404 "Order not found"
+GET {{orders}}/00000000-0000-0000-0000-000000000000
+
+### 27. Invalid order id - expect 400
+GET {{orders}}/12345
